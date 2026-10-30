@@ -120,9 +120,20 @@ impl App {
         let Some(table) = crate::data::tables(&text).into_iter().next() else { return out };
         let col = |prefix: &str| table.headers.iter().position(|h| h.starts_with(prefix));
         let (Some(uma), Some(white)) = (col("Uma"), col("White")) else { return out };
+        let finished = self.veterans();
         for parent in &self.planner.plan.parents {
             let name = parent.split(" — ").next().unwrap_or("").trim();
             if name.is_empty() {
+                continue;
+            }
+            // An imported finished uma: its sparks from the import, since skill names can hold
+            // the commas the cell is split on ("Forward, March!").
+            if let Some(v) = crate::veterans::row_id(name).and_then(|id| finished.iter().find(|v| v.trained_chara_id == id)) {
+                for s in v.factors().iter().filter_map(|f| self.kb.sparks.get(f)).filter(|s| s.kind == "white") {
+                    if let Some(k) = self.kb.skills.values().find(|k| k.sp > 0 && k.tier() == "White" && k.name.eq_ignore_ascii_case(&s.name)) {
+                        out.entry(k.id).or_insert_with(|| format!("{name}'s spark ({}★)", s.stars));
+                    }
+                }
                 continue;
             }
             let Some(row) = table.rows.iter().find(|r| r.get(uma).is_some_and(|u| u.trim() == name)) else { continue };

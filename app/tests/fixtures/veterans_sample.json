@@ -1,0 +1,10 @@
+[
+  {"trained_chara_id": 7, "card_id": 100701, "rank": 14, "rank_score": 12500, "scenario_id": 3, "create_time": "2025-09-16 02:50:09",
+   "win_saddle_id_array": [1, 155],
+   "factor_info_array": [{"factor_id": 203, "level": 0}, {"factor_id": 1102, "level": 0}, {"factor_id": 2000101, "level": 0}],
+   "succession_chara_array": [
+     {"position_id": 10, "card_id": 101301, "factor_info_array": [{"factor_id": 103}], "win_saddle_id_array": [155]},
+     {"position_id": 20, "card_id": 100301, "factor_info_array": [{"factor_id": 1202}], "win_saddle_id_array": []}]},
+  {"trained_chara_id": 8, "card_id": 100201, "rank": 13, "rank_score": 10500, "scenario_id": 4, "create_time": "2026-10-01 10:00:00",
+   "win_saddle_id_array": [155], "factor_info_array": [{"factor_id": 102}, {"factor_id": 1302}], "succession_chara_array": []}
+]

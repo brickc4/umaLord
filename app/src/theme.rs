@@ -398,21 +398,175 @@ fn visuals(dark: bool) -> Visuals {
     v
 }
 
-/// Segoe UI (Windows' UI font) for text, Segoe UI Semibold for headings, then egui's own fonts,
-/// Segoe UI Symbol for ☆ ♪ ≠ ∞ ♡, and a Japanese font for event text. Falls back to egui's
-/// defaults where a font is missing.
-fn install_fonts(ctx: &egui::Context) {
+/// A system font for one role, per platform: file names in Windows' Fonts folder, macOS paths
+/// with the face in the collection, and fontconfig patterns elsewhere, each tried in order.
+#[allow(dead_code)] // each platform reads only its own list
+struct SystemFont {
+    windows: &'static [&'static str],
+    macos: &'static [(&'static str, u32)],
+    fontconfig: &'static [&'static str],
+}
+
+/// Where a font lives, and its face in a collection.
+#[cfg(windows)]
+fn font_file(font: &SystemFont) -> Option<(std::path::PathBuf, u32)> {
     let dir = std::env::var_os("WINDIR").map_or_else(|| std::path::PathBuf::from(r"C:\Windows"), std::path::PathBuf::from).join("Fonts");
+    font.windows.iter().map(|f| dir.join(f)).find(|p| p.is_file()).map(|p| (p, 0))
+}
+#[cfg(target_os = "macos")]
+fn font_file(font: &SystemFont) -> Option<(std::path::PathBuf, u32)> {
+    font.macos.iter().map(|&(p, i)| (std::path::PathBuf::from(p), i)).find(|(p, i)| p.is_file() && is_static(p, *i))
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn font_file(font: &SystemFont) -> Option<(std::path::PathBuf, u32)> {
+    font.fontconfig.iter().find_map(|pattern| fontconfig_file(pattern))
+}
+
+/// What fontconfig picks for `pattern`.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn fontconfig_file(pattern: &str) -> Option<(std::path::PathBuf, u32)> {
+    let fc = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new(args[0]).args(&args[1..]).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    const FORMAT: &str = "--format=%{family[0]}\t%{style[0]}\t%{index}\t%{lang}\t%{file}\n";
+    struct Face<'a> {
+        family: &'a str,
+        style: &'a str,
+        langs: &'a str,
+        file: std::path::PathBuf,
+        index: u32,
+    }
+    impl Face<'_> {
+        /// egui draws nothing for a variable font's glyphs, so only static faces count.
+        /// fontconfig's own flag can't tell: it lists a variable font's default and named
+        /// instances as not variable (the latter with the instance in the index's high bits).
+        fn usable(&self) -> bool {
+            self.index < 0x1_0000 && is_static(&self.file, self.index)
+        }
+    }
+    fn faces(text: &str) -> Vec<Face<'_>> {
+        text.lines()
+            .filter_map(|l| {
+                let mut f = l.splitn(5, '\t');
+                let (family, style, index, langs, file) = (f.next()?, f.next()?, f.next()?, f.next()?, f.next()?);
+                let index: u32 = index.parse().ok()?;
+                let file = std::path::PathBuf::from(file);
+                Some(Face { family, style, langs, file, index })
+            })
+            .collect()
+    }
+    // fc-list matches exactly, where fc-match substitutes its closest font (NixOS's emoji rules
+    // turn "Noto Emoji" into Noto Color Emoji, which egui can't draw). Prefer the upright weight,
+    // and a proportional family over a Mono one.
+    let list = |pat: &str| -> Option<(std::path::PathBuf, u32)> {
+        let text = fc(&["fc-list", pat, FORMAT])?;
+        let all = faces(&text);
+        let upright = |f: &&Face| matches!(f.style, "Regular" | "Book" | "Normal" | "Roman") && f.usable();
+        let face = all.iter().filter(upright).find(|f| !f.family.contains("Mono")).or_else(|| all.iter().find(upright)).or_else(|| all.iter().find(|f| f.usable()))?;
+        Some((face.file.clone(), face.index))
+    };
+    if !pattern.starts_with("sans-serif") {
+        return list(pattern);
+    }
+    let lang = pattern.split_once(":lang=").map(|(_, l)| l);
+    // The desktop's own sans-serif, ranked through the user's aliases by `fc-match -s`: the
+    // first static face, and with :lang= the first that covers it (a variable Noto Sans CJK JP
+    // ranks first, but its static copy comes before Noto Sans CJK SC's Chinese shapes).
+    let text = fc(&["fc-match", "-s", pattern, FORMAT])?;
+    let face = faces(&text).into_iter().find(|f| lang.is_none_or(|l| f.langs.split('|').any(|x| x == l)) && f.usable())?;
+    Some((face.file, face.index))
+}
+
+/// Whether face `index` of a font file has no `fvar` table, read from its sfnt table directory
+/// (behind the `ttcf` header in a collection).
+#[cfg(not(windows))]
+fn is_static(path: &std::path::Path, index: u32) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let read = || -> std::io::Result<bool> {
+        let mut file = std::fs::File::open(path)?;
+        let mut word = [0u8; 4];
+        let at = |file: &mut std::fs::File, pos: u64, buf: &mut [u8]| -> std::io::Result<()> {
+            file.seek(SeekFrom::Start(pos))?;
+            file.read_exact(buf)
+        };
+        at(&mut file, 0, &mut word)?;
+        let mut offset = 0u64;
+        if &word == b"ttcf" {
+            at(&mut file, 12 + 4 * u64::from(index), &mut word)?;
+            offset = u64::from(u32::from_be_bytes(word));
+        }
+        let mut count = [0u8; 2];
+        at(&mut file, offset + 4, &mut count)?;
+        let mut dir = vec![0u8; 16 * usize::from(u16::from_be_bytes(count))];
+        at(&mut file, offset + 12, &mut dir)?;
+        Ok(!dir.as_chunks::<16>().0.iter().any(|record| &record[..4] == b"fvar"))
+    };
+    read().unwrap_or(false)
+}
+
+/// Static subsets of Noto Emoji, DejaVu Sans, DejaVu Sans Mono, Noto Sans Symbols, Noto Sans
+/// Math, Noto Sans Symbols 2 and Noto Sans CJK JP (its full-width forms, ＋ among them) with every symbol the app and its data draw (`tools/subset_fonts.py`; licenses beside
+/// them). Windows has these in Segoe UI Symbol; elsewhere no font is everywhere, and egui can't
+/// draw a variable font (which Noto Emoji is).
+const BUNDLED: [(&str, &[u8]); 7] = [
+    ("Bundled emoji", include_bytes!("../assets/fonts/NotoEmoji-umaLord.ttf")),
+    ("Bundled DejaVu", include_bytes!("../assets/fonts/DejaVuSans-umaLord.ttf")),
+    ("Bundled DejaVu Mono", include_bytes!("../assets/fonts/DejaVuSansMono-umaLord.ttf")),
+    ("Bundled symbols", include_bytes!("../assets/fonts/NotoSansSymbols-umaLord.ttf")),
+    ("Bundled math", include_bytes!("../assets/fonts/NotoSansMath-umaLord.ttf")),
+    ("Bundled symbols 2", include_bytes!("../assets/fonts/NotoSansSymbols2-umaLord.ttf")),
+    ("Bundled full-width", include_bytes!("../assets/fonts/NotoSansCJKjp-umaLord.ttf")),
+];
+
+const REGULAR: SystemFont = SystemFont {
+    windows: &["segoeui.ttf"],
+    macos: &[("/System/Library/Fonts/Helvetica.ttc", 0), ("/System/Library/Fonts/Supplemental/Arial.ttf", 0)],
+    fontconfig: &["sans-serif:weight=regular"],
+};
+const SEMIBOLD_FONT: SystemFont = SystemFont {
+    windows: &["seguisb.ttf"],
+    macos: &[("/System/Library/Fonts/Helvetica.ttc", 1), ("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 0)],
+    fontconfig: &["sans-serif:weight=semibold"],
+};
+const SYMBOL: SystemFont = SystemFont { windows: &["seguisym.ttf"], macos: &[("/System/Library/Fonts/Apple Symbols.ttf", 0)], fontconfig: &[] };
+const JAPANESE: SystemFont = SystemFont {
+    windows: &["YuGothR.ttc", "meiryo.ttc", "msgothic.ttc"],
+    macos: &[("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", 0), ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0)],
+    // fontconfig ranks Unifont (a last-resort bitmap font) above a static Noto CJK, so ask for
+    // the Japanese Noto by name first.
+    fontconfig: &["Noto Sans CJK JP", "sans-serif:lang=ja"],
+};
+
+/// Segoe UI (Windows' UI font) for text, Segoe UI Semibold for headings, then egui's own fonts,
+/// Segoe UI Symbol for ☆ ♪ ≠ ∞ ♡, a Japanese font for event text, and the bundled symbol fonts
+/// for anything those lack. macOS uses Helvetica, Apple Symbols and Hiragino; other systems ask
+/// fontconfig for the desktop's sans-serif and a Japanese sans. Falls back to egui's defaults
+/// where a font is missing.
+fn install_fonts(ctx: &egui::Context) {
     let mut defs = FontDefinitions::default();
-    let mut load = |name: &str, files: &[&str]| -> Option<String> {
-        let bytes = files.iter().find_map(|f| std::fs::read(dir.join(f)).ok())?;
-        defs.font_data.insert(name.to_string(), Arc::new(FontData::from_owned(bytes)));
+    let mut loaded: Vec<(std::path::PathBuf, u32, String)> = Vec::new();
+    let mut load = |name: &str, font: &SystemFont| -> Option<String> {
+        let (path, index) = font_file(font)?;
+        // fontconfig may answer with a font already loaded (no semibold gives the regular one):
+        // reuse it, so each chain still gets its glyphs.
+        if let Some((.., known)) = loaded.iter().find(|(p, i, _)| *p == path && *i == index) {
+            return Some(known.clone());
+        }
+        let bytes = std::fs::read(&path).ok()?;
+        loaded.push((path, index, name.to_string()));
+        let mut data = FontData::from_owned(bytes);
+        data.index = index;
+        defs.font_data.insert(name.to_string(), Arc::new(data));
         Some(name.to_string())
     };
-    let regular = load("Segoe UI", &["segoeui.ttf"]);
-    let semibold = load("Segoe UI Semibold", &["seguisb.ttf"]);
-    let fallbacks: Vec<String> =
-        [load("Segoe UI Symbol", &["seguisym.ttf"]), load("Japanese", &["YuGothR.ttc", "meiryo.ttc", "msgothic.ttc"])].into_iter().flatten().collect();
+    let regular = load("Regular", &REGULAR);
+    let semibold = load("Semibold", &SEMIBOLD_FONT);
+    let mut fallbacks: Vec<String> = [load("Symbol", &SYMBOL), load("Japanese", &JAPANESE)].into_iter().flatten().collect();
+    for (name, bytes) in BUNDLED {
+        defs.font_data.insert(name.to_string(), Arc::new(FontData::from_static(bytes)));
+        fallbacks.push(name.to_string());
+    }
 
     let base_prop = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let base_mono = defs.families.get(&FontFamily::Monospace).cloned().unwrap_or_default();
@@ -438,7 +592,7 @@ fn apply_spacing(s: &mut egui::Style) {
     s.spacing.menu_margin = Margin::same((8.0 * d) as i8);
 }
 
-/// Fonts, colours and spacing, starting in `mode` (System follows Windows).
+/// Fonts, colours and spacing, starting in `mode` (System follows the OS).
 pub fn install(ctx: &egui::Context, mode: Mode) {
     install_fonts(ctx);
     for theme in [Theme::Dark, Theme::Light] {
@@ -470,6 +624,15 @@ pub fn is_dark(ctx: &egui::Context) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The macOS font paths are written from Apple's layout, not looked up, so CI checks them.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_fonts_exist_and_are_static() {
+        for (role, font) in [("regular", &REGULAR), ("semibold", &SEMIBOLD_FONT), ("symbol", &SYMBOL), ("Japanese", &JAPANESE)] {
+            assert!(font_file(font).is_some(), "no static {role} font at {:?}", font.macos);
+        }
+    }
 
     /// Status colours, weak text, gold and links read as text (WCAG AA, 4.5:1) on cards and on
     /// the page, in both modes and every theme.

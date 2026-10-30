@@ -1,6 +1,6 @@
 //! Live event data, fetched in the background on launch: the official Global news feed
 //! (umamusume.com) and Moomoolator's event presets (umalator.app). Cached per user in
-//! `%APPDATA%\umaLord\cache\events.json`. For dates, conditions and disabled skills the official
+//! `%APPDATA%\umaLord\cache\events.json` (`~/.config/umaLord/cache` off Windows). For dates, conditions and disabled skills the official
 //! announcement wins over Umalator's guess, which wins over the bundled
 //! `knowledge/data/umalator.json`; Umalator gives the exact course (inner or outer layout).
 
@@ -13,6 +13,9 @@ use crate::knowledge::{EventPreset, EventSource, Knowledge};
 
 pub const NEWS_URL: &str = "https://umamusume.com/api/ajax/pr_info_index?format=json";
 pub const UMALATOR_URL: &str = "https://umalator.app";
+pub const UMA_GUIDE_URL: &str = "https://uma.guide";
+/// The affinity tables change only when characters are added: refetch them weekly.
+pub const AFFINITY_STALE_SECS: i64 = 7 * 86400;
 /// An article on the official site.
 pub fn article_url(id: u32) -> String {
     format!("https://umamusume.com/news/{id}/")
@@ -110,6 +113,19 @@ pub struct LiveData {
     pub announcements: Vec<Announcement>,
     /// Umalator's presets as fetched; course names are filled in when merging.
     pub umalator_presets: Vec<EventPreset>,
+    /// uma.guide, for the affinity tables (fetched weekly; an empty message means it wasn't due).
+    #[serde(default)]
+    pub uma_guide: SourceStatus,
+    #[serde(default)]
+    pub affinity: Option<crate::affinity::AffinityTable>,
+    /// The spark and win tables, from the same uma.guide download as the affinity tables.
+    #[serde(default)]
+    pub sparks: Option<Vec<crate::knowledge::SparkInfo>>,
+    #[serde(default)]
+    pub saddles: Option<std::collections::HashMap<u32, crate::knowledge::Saddle>>,
+    /// The last try at the affinity tables (UTC seconds), so a failure waits a day to retry.
+    #[serde(default)]
+    pub affinity_tried: i64,
 }
 
 impl LiveData {
@@ -124,8 +140,23 @@ impl LiveData {
                 self.umalator_presets = old.umalator_presets.clone();
                 self.umalator.fetched_at = old.umalator.fetched_at;
             }
+            // The affinity tables refresh on their own thread and write these themselves.
+            self.affinity = old.affinity.clone();
+            self.sparks = old.sparks.clone();
+            self.saddles = old.saddles.clone();
+            self.uma_guide = old.uma_guide.clone();
+            self.affinity_tried = old.affinity_tried;
         }
         self
+    }
+
+    /// Whether the affinity tables are due a refetch: the newest copy (fetched, or the bundled one
+    /// read on `bundled`) is over a week old, and the last try was over a day ago.
+    pub fn affinity_due(d: Option<&LiveData>, bundled: &str) -> bool {
+        let bundled = date_epoch(bundled.get(..10).unwrap_or_default()).unwrap_or(0);
+        let newest = d.and_then(|d| d.uma_guide.fetched_at).unwrap_or(0).max(bundled);
+        let tried = d.map_or(0, |d| d.affinity_tried);
+        now() - newest > AFFINITY_STALE_SECS && now() - tried > 86_400
     }
 }
 
@@ -173,12 +204,18 @@ pub fn date_epoch(date: &str) -> Option<i64> {
     Some(epoch(y, m, d, 0, 0))
 }
 
+/// UTC seconds as `YYYY-MM-DDTHH:MM:SSZ`, which sorts by time.
+pub fn iso(t: i64) -> String {
+    let s = t.rem_euclid(86_400);
+    format!("{}T{:02}:{:02}:{:02}Z", utc_date(t), s / 3600, s / 60 % 60, s % 60)
+}
+
 pub fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 /// A time in this computer's time zone (daylight saving for that date included):
-/// (year, month, day, hour, minute, weekday 0 = Sunday). Falls back to UTC off Windows.
+/// (year, month, day, hour, minute, weekday 0 = Sunday). Falls back to UTC if the system can't say.
 pub fn local(t: i64) -> (i64, u32, u32, u32, u32, u32) {
     let utc = || {
         let days = t.div_euclid(86_400);
@@ -212,6 +249,38 @@ pub fn local(t: i64) -> (i64, u32, u32, u32, u32, u32) {
         let ok = unsafe { SystemTimeToTzSpecificLocalTime(std::ptr::null(), &input, &mut out) };
         if ok != 0 {
             return (i64::from(out.year), u32::from(out.month), u32::from(out.day), u32::from(out.hour), u32::from(out.minute), u32::from(out.weekday));
+        }
+    }
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    {
+        /// POSIX `struct tm` as glibc, musl and macOS lay it out on 64-bit targets.
+        #[repr(C)]
+        struct Tm {
+            sec: i32,
+            min: i32,
+            hour: i32,
+            mday: i32,
+            mon: i32,
+            year: i32,
+            wday: i32,
+            yday: i32,
+            isdst: i32,
+            gmtoff: i64,
+            zone: *const std::ffi::c_char,
+        }
+        unsafe extern "C" {
+            fn tzset();
+            fn localtime_r(t: *const i64, out: *mut Tm) -> *mut Tm;
+        }
+        let mut out = Tm { sec: 0, min: 0, hour: 0, mday: 0, mon: 0, year: 0, wday: 0, yday: 0, isdst: 0, gmtoff: 0, zone: std::ptr::null() };
+        // SAFETY: `t` and `out` live for the call; tzset reads TZ (or /etc/localtime) first, which
+        // localtime_r isn't required to do itself.
+        let ok = unsafe {
+            tzset();
+            !localtime_r(&t, &mut out).is_null()
+        };
+        if ok {
+            return (i64::from(out.year) + 1900, (out.mon + 1) as u32, out.mday as u32, out.hour as u32, out.min as u32, out.wday as u32);
         }
     }
     utc()
@@ -852,15 +921,19 @@ pub fn merge(kb: &Knowledge, bundled: &[EventPreset], live: &LiveData) -> Vec<Ev
 // ---------------------------------------------------------------------------
 // Fetching and the cache
 
-/// GET (or POST `body` as JSON) with Windows' curl.exe: no TLS crates needed.
+/// GET (or POST `body` as JSON) with curl (Windows ships curl.exe): no TLS crates needed.
 fn fetch(url: &str, body: Option<&str>) -> Result<String, String> {
-    let mut cmd = std::process::Command::new("curl.exe");
-    cmd.args(["-sSfL", "--max-time", "15", "-A", &format!("umaLord/{}", env!("CARGO_PKG_VERSION"))]);
+    fetch_within(url, body, 15)
+}
+
+fn fetch_within(url: &str, body: Option<&str>, secs: u32) -> Result<String, String> {
+    let mut cmd = std::process::Command::new(crate::ask::CURL);
+    cmd.args(["-sSfL", "--max-time", &secs.to_string(), "-A", &format!("umaLord/{}", env!("CARGO_PKG_VERSION"))]);
     if let Some(b) = body {
         cmd.args(["-H", "Content-Type: application/json", "--data-raw", b]);
     }
     cmd.arg(url);
-    let out = crate::ask::hidden(&mut cmd).output().map_err(|e| format!("couldn't run curl.exe: {e}"))?;
+    let out = crate::ask::hidden(&mut cmd).output().map_err(|e| format!("couldn't run {}: {e}", crate::ask::CURL))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(if err.is_empty() { "no answer".into() } else { err.trim_start_matches("curl: ").to_string() });
@@ -890,6 +963,44 @@ fn fetch_umalator() -> Result<Vec<EventPreset>, String> {
     let path: String = page[start..].chars().take_while(|c| !matches!(c, '"' | '\'' | ' ' | '>')).collect();
     let presets = parse_umalator_presets(&fetch(&format!("{UMALATOR_URL}{path}"), None)?);
     if presets.is_empty() { Err("no event presets in the app bundle".into()) } else { Ok(presets) }
+}
+
+/// The affinity tables from uma.guide's data chunk (about 10 MB), found the way
+/// `tools/update_knowledge.py` finds it: the characters page, then its app bundle.
+/// uma.guide's game tables the app refreshes itself: affinity, sparks and win records, all read
+/// from its data chunk. The spark and win tables are optional, so a change there never costs the
+/// affinity tables.
+pub struct UmaGuideTables {
+    pub affinity: crate::affinity::AffinityTable,
+    pub sparks: Option<Vec<crate::knowledge::SparkInfo>>,
+    pub saddles: Option<std::collections::HashMap<u32, crate::knowledge::Saddle>>,
+}
+
+pub fn fetch_uma_guide_tables() -> Result<UmaGuideTables, String> {
+    let page = fetch(&format!("{UMA_GUIDE_URL}/characters/"), None)?;
+    let app = find_asset(&page, "/assets/app.").ok_or("couldn't find uma.guide's app bundle")?;
+    let bundle = fetch(&format!("{UMA_GUIDE_URL}{app}"), None)?;
+    let chunk = find_asset(&format!("{page} {bundle}"), "chunks/uma-data.").ok_or("couldn't find uma.guide's data chunk")?;
+    let url = if chunk.starts_with('/') { format!("{UMA_GUIDE_URL}{chunk}") } else { format!("{UMA_GUIDE_URL}/assets/{chunk}") };
+    let data = fetch_within(&url, None, 90)?;
+    Ok(UmaGuideTables {
+        affinity: crate::affinity::AffinityTable::from_uma_guide(&data, &iso(now()))?,
+        sparks: crate::veterans::sparks_from_uma_guide(&data).ok(),
+        saddles: crate::veterans::saddles_from_uma_guide(&data).ok(),
+    })
+}
+
+/// The first `prefix….js` path in `text`.
+fn find_asset(text: &str, prefix: &str) -> Option<String> {
+    let mut rest = text;
+    while let Some(i) = rest.find(prefix) {
+        let path: String = rest[i..].chars().take_while(|c| c.is_ascii_alphanumeric() || "/._-".contains(*c)).collect();
+        if path.ends_with(".js") {
+            return Some(path);
+        }
+        rest = &rest[i + prefix.len()..];
+    }
+    None
 }
 
 /// Both sources, as one `LiveData` (failed sources marked, with what went wrong).
@@ -922,6 +1033,16 @@ pub fn spawn_refresh(ctx: Option<eframe::egui::Context>) -> Receiver<LiveData> {
         if let Some(ctx) = ctx {
             ctx.request_repaint();
         }
+    });
+    rx
+}
+
+/// The affinity tables on their own thread: a 10 MB download mustn't hold up the schedule.
+pub fn spawn_affinity(ctx: eframe::egui::Context) -> Receiver<Result<UmaGuideTables, String>> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(fetch_uma_guide_tables());
+        ctx.request_repaint();
     });
     rx
 }
@@ -1099,13 +1220,19 @@ mod tests {
         assert_eq!((oph.course, oph.date.as_str(), oph.event.as_str()), (10506, "2026-10-10", "Champions Meeting"), "Nakayama Turf 2500m (inner)");
     }
 
-    /// Hits the live feed and Umalator: `cargo test --release live_sources -- --ignored --nocapture`.
+    /// Hits the live feed, Umalator and uma.guide: `cargo test --release live_sources -- --ignored --nocapture`.
+    /// The fetched affinity tables must equal the bundled ones unless a character was added since.
     #[test]
     #[ignore]
     fn live_sources() {
         let d = refresh();
         eprintln!("news: {:?}\numalator: {:?}", d.news, d.umalator);
         assert!(d.news.ok && d.umalator.ok);
+        let (live, bundled) = (fetch_uma_guide_tables().unwrap(), kb());
+        assert_eq!((&live.affinity.points, &live.affinity.members), (&bundled.affinity.points, &bundled.affinity.members), "rerun tools/update_knowledge.py --only affinity if a character was added");
+        let sparks: std::collections::HashMap<u32, crate::knowledge::SparkInfo> = live.sparks.unwrap().into_iter().map(|s| (s.id, s)).collect();
+        assert_eq!(sparks, bundled.sparks, "the app reads the spark table as the updater writes it");
+        assert_eq!(live.saddles.unwrap(), bundled.saddles, "and the win table");
         let merged = merge(&kb(), &kb().umalator_presets, &d);
         for e in merged.iter().filter(|e| e.date.as_str() >= "2026-10-01") {
             eprintln!("{} {} {} {:?} announced={} disabled={}", e.date, e.name, e.course_name, e.source, e.announced, e.disabled_skills.len());
@@ -1122,6 +1249,7 @@ pub(crate) struct LiveState {
     /// What the last refresh found (from the cache until a refresh finishes).
     pub data: Option<LiveData>,
     pub rx: Option<Receiver<LiveData>>,
+    pub affinity_rx: Option<Receiver<Result<UmaGuideTables, String>>>,
     /// The bundled presets, merged again after every refresh and Reload.
     pub bundled: Vec<EventPreset>,
     /// Start a refresh on the next frame (there's no `Context` in `App::new`).
@@ -1177,6 +1305,17 @@ impl crate::App {
         if let Some(d) = &self.live.data {
             self.kb.umalator_presets = merge(&self.kb, &self.live.bundled, d);
             self.planner.key_memo.set(None);
+            // A fetched affinity table replaces the bundled one when it's newer.
+            if let Some(a) = d.affinity.as_ref().filter(|a| !a.is_empty() && a.fetched > self.kb.affinity.fetched) {
+                self.kb.affinity = a.clone();
+                // The spark and win tables came in the same download, so they're as new.
+                if let Some(s) = d.sparks.as_ref().filter(|s| !s.is_empty()) {
+                    self.kb.sparks = s.iter().map(|s| (s.id, s.clone())).collect();
+                }
+                if let Some(w) = d.saddles.as_ref().filter(|w| !w.is_empty()) {
+                    self.kb.saddles = w.clone();
+                }
+            }
         }
     }
 
@@ -1192,7 +1331,11 @@ impl crate::App {
     pub(crate) fn live_poll(&mut self, ctx: &eframe::egui::Context) {
         if std::mem::take(&mut self.live.start) && self.live.rx.is_none() {
             self.live.rx = Some(spawn_refresh(Some(ctx.clone())));
+            if self.live.affinity_rx.is_none() && (self.live.manual || LiveData::affinity_due(self.live.data.as_ref(), &self.kb.affinity.fetched)) {
+                self.live.affinity_rx = Some(spawn_affinity(ctx.clone()));
+            }
         }
+        self.affinity_poll();
         let Some(rx) = &self.live.rx else { return };
         let Ok(d) = rx.try_recv() else { return };
         self.live.rx = None;
@@ -1217,6 +1360,34 @@ impl crate::App {
         }
     }
 
+    /// Take the affinity tables when their download finishes, and keep them in the cache.
+    fn affinity_poll(&mut self) {
+        let Some(rx) = &self.live.affinity_rx else { return };
+        let Ok(result) = rx.try_recv() else { return };
+        self.live.affinity_rx = None;
+        let t = now();
+        let d = self.live.data.get_or_insert_with(Default::default);
+        d.affinity_tried = t;
+        match result {
+            Ok(g) => {
+                let extra = match (&g.sparks, &g.saddles) {
+                    (Some(s), Some(w)) => format!(", {} sparks, {} win records", s.len(), w.len()),
+                    _ => ", but not its spark or win table".into(),
+                };
+                d.uma_guide = SourceStatus { ok: true, message: format!("affinity for {} characters{extra}", g.affinity.members.len()), fetched_at: Some(t) };
+                d.affinity = Some(g.affinity);
+                d.sparks = g.sparks.or(d.sparks.take());
+                d.saddles = g.saddles.or(d.saddles.take());
+            }
+            Err(e) => {
+                d.uma_guide.ok = false;
+                d.uma_guide.message = e;
+            }
+        }
+        save_cache(d);
+        self.apply_live();
+    }
+
     /// The status bar's line about the schedule: text, hover, and whether it's a warning.
     pub(crate) fn live_status(&self) -> (String, String, bool) {
         let sources = |d: &LiveData| {
@@ -1224,7 +1395,13 @@ impl crate::App {
                 let when = s.fetched_at.map(|t| format!(", last fetched {}", fmt_ago(now() - t))).unwrap_or_default();
                 format!("{name}: {} {}{when}", if s.ok { "✔" } else { "✖" }, s.message)
             };
-            format!("{}\n{}\nChecked {}. Settings → Data and updates refreshes it.", line("umamusume.com", &d.news), line("umalator.app", &d.umalator), fmt_ago(now() - d.checked_at))
+            format!(
+                "{}\n{}\n{}\nChecked {}. Settings → Data and updates refreshes it.",
+                line("umamusume.com", &d.news),
+                line("umalator.app", &d.umalator),
+                if d.uma_guide.message.is_empty() { "uma.guide (affinity): not fetched yet".to_string() } else { line("uma.guide (affinity)", &d.uma_guide) },
+                fmt_ago(now() - d.checked_at)
+            )
         };
         if self.live.rx.is_some() {
             return ("📅 Checking the Champions Meeting schedule…".into(), String::new(), false);

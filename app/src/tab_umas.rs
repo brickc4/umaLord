@@ -732,7 +732,12 @@ impl App {
                     });
                     ui.label(RichText::new(format!("[{}]", uma.outfit)).italics().color(p.weak));
                     ui.add_space(2.0);
-                    stars_widget(ui, uma.stars, 7.5);
+                    ui.horizontal(|ui| {
+                        stars_widget(ui, uma.stars, 7.5);
+                        if uma.stars < 5 && ui.small_btn(RichText::new("＋").color(p.weak)).on_hover_text(format!("Pulled another copy? Raise her to {}★ and save it. Shortcut: +", uma.stars + 1)).clicked() {
+                            self.raise_uma(uma.id);
+                        }
+                    });
                     ui.add_space(2.0);
                     ui.horizontal_wrapped(|ui| {
                         if uma.potential >= 5 {

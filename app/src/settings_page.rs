@@ -29,7 +29,7 @@ impl SettingsPage {
             SettingsPage::Profile => ("👤", "Profile", "Whose account this is, and saving, loading or emptying it."),
             SettingsPage::Appearance => ("🎨", "Appearance", "Dark or light, the colour theme, Seiun Sky, and the size of everything."),
             SettingsPage::Data => ("🗂", "Data and updates", "Where the game data comes from, how old it is, and how to refresh it."),
-            SettingsPage::Ai => ("💬", "AI assistant", "Who answers on the Ask tab: a free model through OpenCode, or Claude with your key."),
+            SettingsPage::Ai => ("💬", "AI assistant", "Who answers on the Ask tab: a free model through OpenCode, or Claude with your Claude account or an API key."),
             SettingsPage::About => ("ℹ", "About", "Version, credits, license and keyboard shortcuts."),
         }
     }
@@ -211,6 +211,11 @@ fn big_choice<T: PartialEq + Copy>(ui: &mut egui::Ui, value: T, options: &[(T, &
     picked
 }
 
+/// Where the knowledge commands run, and the Python that runs them: Windows has `python` (and
+/// PowerShell); elsewhere it's `python3` in a terminal.
+const SHELL: &str = if cfg!(windows) { "PowerShell" } else { "a terminal" };
+const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
 /// A command with a Copy button, for things to run in a terminal.
 fn command_line(ui: &mut egui::Ui, cmd: &str) {
     let p = pal(ui);
@@ -218,7 +223,7 @@ fn command_line(ui: &mut egui::Ui, cmd: &str) {
         egui::Frame::new().fill(p.input).stroke(Stroke::new(1.0, p.border)).corner_radius(CornerRadius::same(6)).inner_margin(Margin::symmetric(8, 4)).show(ui, |ui| {
             ui.label(RichText::new(cmd).monospace().size(size::SM));
         });
-        if ui.small_btn("📋 Copy").on_hover_text("Copy the command, to paste in PowerShell in the umaLord folder").clicked() {
+        if ui.small_btn("📋 Copy").on_hover_text(format!("Copy the command, to paste in {SHELL} in your data folder")).clicked() {
             ui.ctx().copy_text(cmd.to_string());
         }
     });
@@ -372,7 +377,7 @@ impl App {
                 Some(root) => {
                     ui.label(RichText::new(root.display().to_string()).monospace().size(size::SM));
                     if ui.button("📂 Open folder").clicked() {
-                        let _ = std::process::Command::new("explorer").arg(root).spawn();
+                        let _ = crate::ui_util::show_in_folder(root);
                     }
                 }
                 None => _ = ui.label(RichText::new("The umaLord folder wasn't found.").color(p.warn)),
@@ -397,6 +402,20 @@ impl App {
         if action(ui, "📥 Load a profile", "Switch to a saved account. What's here is backed up first.") {
             self.open_setup(crate::onboarding::Step::Import);
             *close = true;
+        }
+        let finished = self.veterans().len();
+        let about = format!(
+            "Your finished umas (parents) with their sparks and lineage, from UmaExtractor's data.json: takes it from Downloads, or drop it on the window. {}",
+            if finished == 0 { "None imported yet.".to_string() } else { format!("{finished} imported.") }
+        );
+        if action(ui, "🌱 Import finished umas", &about) {
+            match crate::settings::user_dir("Downloads").map(|d| d.join("data.json")).filter(|p| p.is_file()) {
+                Some(path) => {
+                    let r = self.import_veterans(&path);
+                    self.toast_flag(r.map_or_else(|e| (e, true), |m| (m, false)));
+                }
+                None => self.toast("No data.json in Downloads. Run UmaExtractor (or tools/read_veterans.py) on the game's Veteran List, then drop its data.json on the window.", ToastKind::Info),
+            }
         }
         if action(ui, "📝 Set up my collection", "Click the umas and cards you own, and set stars and limit breaks.") {
             self.open_setup(crate::onboarding::Step::Umas);
@@ -428,7 +447,7 @@ impl App {
     pub(crate) fn mode_picker(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let options = [
-            (theme::Mode::System, theme::Mode::System.label(), "Follow Windows: dark when Windows is dark"),
+            (theme::Mode::System, theme::Mode::System.label(), "Follow the system: dark when your computer is dark"),
             (theme::Mode::Light, theme::Mode::Light.label(), ""),
             (theme::Mode::Dark, theme::Mode::Dark.label(), ""),
         ];
@@ -585,11 +604,12 @@ impl App {
         let data = self.live.data.clone();
         source_line(ui, "umamusume.com", data.as_ref().map(|d| &d.news));
         source_line(ui, "umalator.app", data.as_ref().map(|d| &d.umalator));
+        source_line(ui, "uma.guide (affinity, weekly)", data.as_ref().map(|d| &d.uma_guide).filter(|s| !s.message.is_empty()));
         ui.horizontal(|ui| {
             if self.live.rx.is_some() {
                 ui.spinner();
                 ui.label(RichText::new("Checking…").color(p.weak));
-            } else if ui.add(egui::Button::new("🔄 Refresh now").min_size(vec2(0.0, 30.0))).on_hover_text("Fetch the news and Umalator's presets again").clicked() {
+            } else if ui.add(egui::Button::new("🔄 Refresh now").min_size(vec2(0.0, 30.0))).on_hover_text("Fetch the news, Umalator's presets and the affinity tables again").clicked() {
                 self.refresh_live(true);
             }
             if let Some(d) = &data {
@@ -629,14 +649,15 @@ impl App {
             None => _ = ui.label(RichText::new("Not downloaded (knowledge/data/skill_tiers.json is missing).").color(p.warn)),
         });
         heading(ui, "Refreshing it");
+        let folder = self.root.as_ref().map_or_else(|| "the umaLord folder".to_string(), |r| r.display().to_string());
         ui.label(
-            RichText::new("Install Python 3, then run one of these in PowerShell from the umaLord folder, and press 🔄 Reload (F5). The meta sheet changes most often.")
+            RichText::new(format!("Install Python 3, then run one of these in {SHELL} from your data folder ({folder}), and press 🔄 Reload (F5). The meta sheet changes most often."))
                 .size(size::SM)
                 .color(p.weak),
         );
         ui.add_space(4.0);
-        command_line(ui, "python -I -X utf8 tools\\update_knowledge.py");
-        command_line(ui, "python -I -X utf8 tools\\update_knowledge.py --only meta");
+        command_line(ui, &format!("{PYTHON} -I -X utf8 tools/update_knowledge.py"));
+        command_line(ui, &format!("{PYTHON} -I -X utf8 tools/update_knowledge.py --only meta"));
         heading(ui, "Advanced");
         ui.horizontal(|ui| {
             if ui.add(egui::Button::new("📝 Browse notes and data files").min_size(vec2(0.0, 30.0))).on_hover_text("Read the markdown files in this folder: insights, plans, results, your roster files and the knowledge notes").clicked() {
@@ -646,7 +667,7 @@ impl App {
             if let Some(root) = &self.root
                 && ui.add(egui::Button::new("📂 Open the game data folder").min_size(vec2(0.0, 30.0))).clicked()
             {
-                let _ = std::process::Command::new("explorer").arg(root.join("knowledge").join("data")).spawn();
+                let _ = crate::ui_util::show_in_folder(&root.join("knowledge").join("data"));
             }
         });
     }
@@ -657,10 +678,14 @@ impl App {
         setting_row(ui, "Answered by", "Who answers your questions on the Ask tab.", |ui| {
             let options = [
                 (crate::ask::Backend::OpenCode, "🆓 OpenCode · free models", "Free models through OpenCode. No account or key; weaker than Claude."),
-                (crate::ask::Backend::ClaudeApi, "🔑 Claude API · your key", "Claude with your own Anthropic API key; use is billed to that key."),
+                (crate::ask::Backend::ClaudeApi, "✳ Claude · your account or key", "Claude, through Claude Code with your Claude account or a setup token, or with an Anthropic API key billed per use."),
             ];
             ui.add_enabled_ui(!busy, |ui| {
-                if let Some(b) = big_choice(ui, self.ask.backend, &options) {
+                if let Some(b) = big_choice(ui, self.ask.backend, &options)
+                    && b != self.ask.backend
+                {
+                    // Each backend keeps its own sessions; the next question starts a fresh one.
+                    self.ask.end_process();
                     self.ask.backend = b;
                     settings::set("ask_backend", serde_json::json!(if b == crate::ask::Backend::OpenCode { "opencode" } else { "claude_api" }));
                 }

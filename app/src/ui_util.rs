@@ -454,6 +454,28 @@ pub fn open_url(url: &str) {
     }
 }
 
+/// Open a folder in the file manager, or show a file selected in its folder (Explorer's /select,
+/// Finder's -R). xdg-open has no "select", so on Linux a file opens its folder.
+pub fn show_in_folder(path: &std::path::Path) -> std::io::Result<std::process::Child> {
+    #[cfg(windows)]
+    {
+        if path.is_dir() {
+            std::process::Command::new("explorer").arg(path).spawn()
+        } else {
+            std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn()
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if path.is_dir() { std::process::Command::new("open").arg(path).spawn() } else { std::process::Command::new("open").arg("-R").arg(path).spawn() }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dir = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
+        std::process::Command::new("xdg-open").arg(dir).spawn()
+    }
+}
+
 /// Stat tiles in equal columns that fill the row, so their edges line up with the cards below.
 pub fn stat_row(ui: &mut egui::Ui, tiles: &[(&str, &str, String, String, Color32)]) {
     ui.columns(tiles.len().max(1), |cols| {

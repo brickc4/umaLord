@@ -257,6 +257,13 @@ fn build_registry() -> Vec<ToolSpec> {
     let query = || obj(json!({"query": {"type": "string"}}), &["query"]);
     let skills = || json!({"type": "array", "items": {"type": "string"}, "description": "Skill names or ids"});
     let purposes = json!({"type": "string", "enum": ["Champions Meeting", "Team Trials", "Parent run", "League of Heroes", "Other"]});
+    let wins = json!({"type": "array", "items": {"type": "string"}, "description": "The G1 races it won, by their exact names in the game data (find_races finds them, e.g. 'Tokyo Yushun (Japanese Derby)'); leave out for none"});
+    let sparks = json!({"type": "array", "items": {"type": "string"}, "description": "For a hypothetical uma (a parent run not done yet): its sparks as the game names them, like \"Dirt 2★\", \"Speed 3★\" or a unique's name with its stars"});
+    let ancestor = obj(json!({"uma": {"type": "string"}, "g1_wins": wins, "sparks": sparks}), &["uma"]);
+    let legacy = obj(
+        json!({"finished": {"type": "integer", "description": "One of the account's finished umas by its #id (list_finished_umas): its sparks, G1 wins and parents come from the import; leave uma, g1_wins, sparks and parents out"}, "uma": {"type": "string"}, "g1_wins": wins, "sparks": sparks, "parents": {"type": "array", "maxItems": 2, "items": ancestor}}),
+        &[],
+    );
     vec![
         // --- Read
         spec("get_account_summary", Read, "👤", "Read the account", "The account at a glance: profile, server, umas by stars and potential, cards by type and limit break, maxed SSRs, saved parents and plans, and the working plan in one line.", obj(json!({}), &[])),
@@ -273,6 +280,55 @@ fn build_registry() -> Vec<ToolSpec> {
         spec("get_slot_ranking", Read, "🏅", "Ranked cards for a slot", "Rank the cards for one deck slot of the working plan, given the rest of the deck: the meta sheet's backing (★), the simulated score in stat points, and why. Slot 1–5 are your own cards, 6 the borrowed friend card. Model output: suggestions, not game data.", obj(json!({"slot": {"type": "integer", "minimum": 1, "maximum": 6}, "top_n": {"type": "integer", "minimum": 1, "maximum": 15}}), &["slot"])),
         spec("explain_card", Read, "🃏", "Explained a card", "Why a card is or isn't a good pick for the working plan: its rank and score for the slot it would fill, the meta sheet's backing, and the reasons.", query()),
         spec("recommend_trainees", Read, "🐴", "Suggested trainees", "The owned trainees that fit the working plan best: the meta sheet's picks you own first (★), then the best aptitude fits, with stars, potential and aptitudes for the goal.", obj(json!({"top_n": {"type": "integer", "minimum": 1, "maximum": 12}}), &[])),
+        spec(
+            "get_affinity",
+            Read,
+            "🌱",
+            "Worked out affinity",
+            "Affinity between a trainee and one or two legacies (parents), each with up to two of its own parents (the trainee's grandparents) and the G1 races each won, from the game's own relation tables. Gives each slot's own affinity, which its sparks roll with (chance = base × (1 + affinity/100)), its parts (relation groups shared with the trainee, the trios through each grandparent, the two legacies' link, +3 per G1 both members of a link won), and the lineage total with the game's symbol (◎ over 150, ○ 51–150, △ 50 or less; the symbol is for the lineage, not one slot). Any outfit of a character gives the same affinity. Wins left out count as none.",
+            obj(json!({"trainee": {"type": "string", "description": "The uma to train: name, outfit or id"}, "legacies": {"type": "array", "minItems": 1, "maxItems": 2, "items": legacy.clone()}}), &["trainee", "legacies"]),
+        ),
+        spec(
+            "parent_run_odds",
+            Read,
+            "🌱",
+            "Worked out a parent run's odds",
+            "What one parent career of an owned uma makes, with the odds and expected careers: her pink spark (picked evenly among the aptitudes she finishes at A or S: give `legacies` to count the ones her lineage raises at the start), her blue (stat 1 in 5, stars by its final value: give `final_stats`), her green if she's 3★+ (stars by rank: `rank_ss`, default true), and how white sparks are made. Each with the careers to expect, plain and with the 30 TP reroll. Use it for every run in a parent-run queue.",
+            obj(
+                json!({"uma": {"type": "string", "description": "The owned uma to run as the parent"}, "legacies": {"type": "array", "maxItems": 2, "items": legacy.clone()}, "final_stats": stats_arg("Her expected final stats"), "rank_ss": {"type": "boolean"}}),
+                &["uma"],
+            ),
+        ),
+        spec(
+            "plan_lineage",
+            Read,
+            "🌱",
+            "Worked out a lineage",
+            "What a lineage gives a trainee, computed exactly: at the start (fixed) each aptitude after the six umas' pink stars (1–3 stars +1 grade, 4–6 +2, 7–9 +3, 10+ +4, never past A), the stats their blue sparks add, and the legacies' inherited uniques; then each slot's chance of firing each pink and green spark over the two April inspirations, and its expected white hints. Legacies are the account's finished umas ({\"finished\": id}) or hypothetical ones with `sparks` (to test a parent run before doing it). `target` marks the aptitudes the goal needs and says how many pink stars reach A. Use it instead of doing spark arithmetic.",
+            obj(
+                json!({"trainee": {"type": "string"}, "legacies": {"type": "array", "minItems": 1, "maxItems": 2, "items": legacy.clone()}, "target": {"type": "object", "properties": {"surface": surface.clone(), "distance": distance.clone(), "style": style.clone()}, "additionalProperties": false}}),
+                &["trainee", "legacies"],
+            ),
+        ),
+        spec(
+            "rank_legacies",
+            Read,
+            "🌱",
+            "Ranked legacy partners",
+            "The characters with the most base affinity to a trainee, from the game's relation tables, with the account's own umas marked (stars: 3★ or more passes on her unique as a green spark). With `with`, ranks a second legacy by its affinity to both the trainee and that first legacy. Base affinity only: grandparents and shared G1 wins add more (get_affinity). With `finished: true`, ranks the account's own finished umas instead, by their whole affinity as a legacy (their parents and G1 wins included), with their sparks.",
+            obj(json!({"trainee": {"type": "string"}, "with": {"type": "string", "description": "A legacy already chosen"}, "owned_only": {"type": "boolean"}, "finished": {"type": "boolean"}, "top_n": {"type": "integer", "minimum": 1, "maximum": 30}}), &["trainee"]),
+        ),
+        spec(
+            "list_finished_umas",
+            Read,
+            "🌱",
+            "Listed finished umas",
+            "The account's finished umas (veterans: the parents it can use), imported from UmaExtractor's data.json: #id, uma, rank, sparks by colour with stars (blue = stat, pink = aptitude, green = unique, white = skills, races and scenario), G1 wins and their own parents. Best rank first. Filter by uma name, by a spark's name (e.g. 'Turf', 'Speed', a skill), its colour and its minimum stars.",
+            obj(
+                json!({"uma": {"type": "string"}, "spark": {"type": "string"}, "kind": {"type": "string", "enum": ["blue", "pink", "green", "white", "race", "scenario"]}, "min_stars": {"type": "integer", "minimum": 1, "maximum": 3}, "top_n": {"type": "integer", "minimum": 1, "maximum": 60}}),
+                &[],
+            ),
+        ),
         spec("list_notes", Read, "📝", "Listed notes", "List the project's markdown notes: insights.md (Claude's evidence-backed opinions), sources.md, plans/*.md (career plans), results/*.md (real results logs), account/*.md.", obj(json!({}), &[])),
         spec("read_note", Read, "📝", "Read a note", "Read one note file by its path from list_notes, e.g. insights.md, results/careers.md, or the sourced knowledge notes: knowledge/mechanics.md (race mechanics, Team Trials scoring, the CM format, sparks, Grand Concert), knowledge/racecourses.md (every CM course's layout and stamina by style) and knowledge/skills.md (skill advice, debuffs, post-race hints).", obj(json!({"path": {"type": "string"}}), &["path"])),
         spec("glossary", Read, "📖", "Looked up a term", "Look up a community term (e.g. 'MLB', 'spark', 'CM').", obj(json!({"term": {"type": "string"}}), &["term"])),
@@ -493,6 +549,8 @@ mod tests {
     fn every_tool_runs_headless() {
         let ctx = egui::Context::default();
         let (mut a, dir) = crate::onboarding::tests::scratch_app("agent-tools");
+        // Two made-up finished umas for list_finished_umas, rank_legacies and get_affinity.
+        std::fs::copy(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/veterans_sample.json"), dir.join(crate::veterans::FILE)).unwrap();
         a.roster = crate::data::Roster::sample();
         let headers = a.result_headers(0);
         let log_fields: serde_json::Map<String, Value> = headers.iter().filter(|h| !h.starts_with("Date")).take(2).map(|h| (h.clone(), json!("from the agent test"))).collect();
@@ -511,6 +569,13 @@ mod tests {
             ("glossary", json!({"term": "spark"})),
             ("new_plan", json!({"goal": "Champions Meeting", "cm": "next", "trainee": "Oguri Cap [Starlight Beat]"})),
             ("recommend_trainees", json!({"top_n": 3})),
+            ("get_affinity", json!({"trainee": "Oguri Cap", "legacies": [{"uma": "Silence Suzuka", "g1_wins": ["Arima Kinen", "Japan Cup"], "parents": [{"uma": "Mejiro McQueen", "g1_wins": ["Arima Kinen"]}]}, {"uma": "Gold Ship"}]})),
+            ("get_affinity", json!({"trainee": "Oguri Cap", "legacies": [{"finished": 7}, {"finished": 8}]})),
+            ("rank_legacies", json!({"trainee": "Oguri Cap", "with": "Gold Ship", "top_n": 5})),
+            ("rank_legacies", json!({"trainee": "Oguri Cap", "finished": true, "top_n": 3})),
+            ("list_finished_umas", json!({"kind": "pink", "min_stars": 2})),
+            ("parent_run_odds", json!({"uma": "Oguri Cap [Starlight Beat]", "legacies": [{"finished": 8}], "final_stats": [1200, 600, 900, 500, 700]})),
+            ("plan_lineage", json!({"trainee": "Oguri Cap [Starlight Beat]", "legacies": [{"finished": 7}, {"uma": "Haru Urara", "sparks": ["Dirt 2 ★", "Speed ★★★", "Escapades 2★", "Victoria por plancha☆ 1★"], "parents": [{"uma": "Gold Ship", "sparks": ["Dirt 1★"]}]}], "target": {"surface": "Dirt", "distance": "Mile", "style": "End"}})),
             ("set_plan", json!({"style": "Pace", "target_stats": [1200, 1000, 1000, 600, 1000], "ground": "Good", "meta_influence": "tie-break"})),
             ("get_plan", json!({})),
             ("set_deck", json!({"cards": ["Kitasan Black"], "friend": "none"})),
@@ -602,7 +667,8 @@ mod tests {
         crate::theme::install(&ctx, crate::theme::Mode::Dark);
         let _ = crate::ui_util::test_frame(&ctx, Default::default(), |_| {});
         let font = egui::FontId::proportional(14.0);
-        let extra = ["💭", "✳", "✔", "✖", "↶", "🔧", "📋", "■", "➤", "⚠", "★"];
+        // 🗐 is egui_commonmark's copy button on code blocks in answers; ＋ is on Add, New plan and the raise buttons.
+        let extra = ["💭", "✳", "✔", "✖", "↶", "🔧", "📋", "■", "➤", "⚠", "★", "🗐", "＋"];
         let missing: Vec<String> = registry()
             .iter()
             .map(|s| s.icon)
@@ -615,8 +681,9 @@ mod tests {
         for sym in ["⍟", "◎", "◯", "▲", "△", "✕"] {
             assert!(ctx.fonts_mut(|f| f.has_glyphs(&font, sym)), "no glyph for the tier mark {sym}");
         }
-        // The check can tell: the compass drew as an empty box.
-        assert!(!ctx.fonts_mut(|f| f.has_glyphs(&font, "🧭")));
+        // The check can tell: a private-use code point no font draws. (It was 🧭, an empty box with
+        // Windows' fonts, until Linux's Noto Emoji turned out to have it.)
+        assert!(!ctx.fonts_mut(|f| f.has_glyphs(&font, "\u{10FFFD}")));
     }
 
     #[test]

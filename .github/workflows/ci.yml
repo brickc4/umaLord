@@ -11,8 +11,13 @@ permissions:
 
 jobs:
   test:
-    name: Build and test (Windows)
-    runs-on: windows-latest
+    name: Build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is what releases ship for; Linux (Wayland) and macOS build from source.
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable

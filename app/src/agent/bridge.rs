@@ -26,7 +26,7 @@ const ANSWER_WAIT: Duration = Duration::from_secs(50);
 
 /// The window's folder for the bridge.
 pub(crate) fn dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("umaLord").join("agent"))
+    crate::settings::app_dir().map(|d| d.join("agent"))
 }
 
 fn stamp() -> u64 {

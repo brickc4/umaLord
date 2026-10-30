@@ -62,7 +62,7 @@ pub fn stamp() -> String {
 fn allowed(rel: &str) -> bool {
     let name_ok = |n: &str| !n.is_empty() && n.ends_with(".md") && !n.contains(['/', '\\', ':']) && !n.starts_with('.');
     match rel.split_once('/') {
-        Some(("account", f)) => matches!(f, "umas.md" | "support_cards.md" | "parents.md"),
+        Some(("account", f)) => matches!(f, "umas.md" | "support_cards.md" | "parents.md" | "veterans.json"),
         Some(("plans", f)) => name_ok(f) && f != "_template.md",
         Some(("results", f)) => name_ok(f),
         None => rel == "insights.md",
@@ -72,7 +72,7 @@ fn allowed(rel: &str) -> bool {
 
 /// The account's files under `root`, as relative paths.
 fn account_files(root: &Path) -> Vec<String> {
-    let mut out: Vec<String> = ["account/umas.md", "account/support_cards.md", "account/parents.md", "insights.md"].map(String::from).to_vec();
+    let mut out: Vec<String> = ["account/umas.md", "account/support_cards.md", "account/parents.md", crate::veterans::FILE, "insights.md"].map(String::from).to_vec();
     for dir in ["plans", "results"] {
         let mut names: Vec<String> = std::fs::read_dir(root.join(dir))
             .into_iter()
@@ -176,6 +176,8 @@ pub fn clear(root: &Path) -> Result<(), String> {
         std::fs::remove_file(&path).map_err(|e| format!("Couldn't remove {rel}: {e}"))?;
         let _ = std::fs::remove_file(path.with_extension("simulate.log"));
     }
+    // The imported finished umas have no blank template: an empty account has none.
+    let _ = std::fs::remove_file(root.join(crate::veterans::FILE));
     for (rel, text) in BLANK {
         let path = root.join(rel);
         if let Some(dir) = path.parent() {
@@ -238,8 +240,8 @@ pub fn import(root: &Path, p: &Profile, now: &str) -> Result<Option<PathBuf>, St
 /// Profile files to offer: in `profiles/`, its backups and the Downloads folder, newest first.
 pub fn find(root: &Path) -> Vec<(PathBuf, Result<Profile, String>)> {
     let mut dirs = vec![root.join(DIR), root.join(DIR).join("backups")];
-    if let Some(home) = std::env::var_os("USERPROFILE") {
-        dirs.push(PathBuf::from(home).join("Downloads"));
+    if let Some(downloads) = crate::settings::user_dir("Downloads") {
+        dirs.push(downloads);
     }
     let mut out: Vec<(PathBuf, std::time::SystemTime)> = dirs
         .iter()
@@ -331,6 +333,7 @@ mod tests {
 
     #[test]
     fn refuses_paths_outside_the_account() {
+        assert!(allowed("account/veterans.json"));
         for bad in ["../evil.md", "account/../../x.md", "plans/../x.md", "app/src/main.rs", "account/other.md", "results/a\\b.md", "plans/_template.md", "C:/x.md"] {
             assert!(!allowed(bad), "{bad}");
         }

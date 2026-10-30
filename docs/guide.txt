@@ -162,9 +162,12 @@ the steps to plan a career, and the game words the app uses.
     - Free models are only offered for a limited time and are weaker than Claude. Pick one
       in Settings > AI assistant. The note under the model says whether your questions are
       kept.
-  - Claude API gives better answers but needs your own Anthropic API key from
-    https://console.anthropic.com, and use is billed to that key. Paste the key into
-    Settings > AI assistant, or set the ANTHROPIC_API_KEY environment variable.
+  - Claude gives better answers. With Claude Code installed (claude.com/claude-code), it can
+    use your Claude account: either sign Claude Code in (run `claude`, then /login) and leave
+    the key box empty, or run `claude setup-token` and paste the sk-ant-oat01-... it prints
+    into Settings > AI assistant. Use counts against your Claude plan. Or paste an Anthropic
+    API key from https://console.anthropic.com (works without Claude Code too), billed per use,
+    or set the ANTHROPIC_API_KEY environment variable.
 
 
 Game knowledge: the Help window's word list and Home's "Did you know?" card come from
@@ -202,14 +205,29 @@ Keyboard shortcuts (also listed in Help):
 - F5: reload your roster, game data and plans
 - Esc: close Help, a dialog, or the details panel
 - ?: open Help
+- +: you pulled another copy of the card or uma whose details are open: one more LB or star
 
 
 Your roster
 -----------
 account\umas.md and account\support_cards.md hold the roster. Setup and the "+ Add umas" /
-"+ Add cards" buttons in Collection edit them for you. You can also edit them in any text
+"+ Add cards" buttons in Collection edit them for you. Pulled another copy of something you
+own? Open it in Collection and click the small + beside its LB diamonds or stars; it saves at
+once, and the message that pops up has Undo. You can also edit the files in any text
 editor: keep the table columns as they are, and press Reload in the app.
 Each row's ID is the uma.guide ID of that uma or card.
+
+Your finished umas (the parents you can use) come from the game itself. On Windows, run
+UmaExtractor (github.com/xancia/UmaExtractor) with the game open on Enhance > Veteran List;
+on Linux, run `sudo python3 -I tools/read_veterans.py -o <your downloads folder>/data.json`
+(root's Python needs the msgpack package; with Nix, run sudo on a Python built with it).
+Then Settings > Profile > Import finished umas (or drop data.json on the window). The app
+lists each one in account\parents.md with its sparks, its parents and its G1 wins, and adds
+any uma you've trained but hadn't listed, or raises her stars or potential to what you trained
+her at. Each import replaces the last (the game's list is the truth); the previous one is kept
+in profiles\backups.
+Both tools only read the game's memory; reading another program's memory may be against the
+game's terms, so use them at your own judgment.
 
 
 Updating the game data

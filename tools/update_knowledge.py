@@ -9,6 +9,7 @@ usage:
     python -I -X utf8 tools/update_knowledge.py --only umalator   # just Moomoolator's data
     python -I -X utf8 tools/update_knowledge.py --only cm         # just the CM schedule
     python -I -X utf8 tools/update_knowledge.py --only meta       # just the PvP meta sheet
+    python -I -X utf8 tools/update_knowledge.py --only affinity   # just the affinity, spark and win tables
 
 Writes (all Global server data):
     knowledge/data/umas.json      trainees: stats, growth, aptitudes, skills, objectives, events
@@ -20,6 +21,11 @@ Writes (all Global server data):
     knowledge/data/umalator.json  from umalator.app: loadable skill ids, courses, CM/LoH presets
     knowledge/data/sim/*.json     Moomoolator's Global data files, unchanged, for the app's simulator
     knowledge/data/cm_schedule.json  uma.guide's CM list with the scenario current at each CM
+    knowledge/data/affinity.json  the game's affinity tables (relation groups, their points and
+                                  members), as uma.guide ships them; the app also refreshes them itself
+    knowledge/data/sparks.json    every spark (factor) id: name, kind (blue, pink, green, white, race,
+                                  scenario, bonus) and stars, for decoding finished umas
+    knowledge/data/saddles.json   every win record (saddle) id: its name and the races it stands for
     knowledge/data/pvp_meta.json  the community PvP Deck & Uma Recommendation sheet (Google Sheets
                                   CSV export): decks, umas, stats and skill advice per CM/LoH and style
 """
@@ -91,10 +97,12 @@ def unescape_template(s: str) -> str:
 
 def json_blocks(src: str) -> list:
     out = []
-    for m in re.finditer(r"[\w$]+=JSON\.parse\(`", src):
+    # Template literals, and single-quoted strings (the affinity tables), which escape the same way.
+    for m in re.finditer(r"[\w$]+=JSON\.parse\(([`'])", src):
         start = i = m.end()
+        quote = m.group(1)
         while True:
-            j = src.index("`", i)
+            j = src.index(quote, i)
             k, bs = j - 1, 0
             while src[k] == "\\":
                 bs += 1; k -= 1
@@ -579,6 +587,70 @@ def write_cm_schedule(uma_data: str) -> None:
     print(f"cm schedule: {len(out)} events")
 
 
+def write_affinity(uma_data: str) -> None:
+    """The game's affinity tables, which uma.guide's data chunk carries as-is: every relation group
+    with its points (`succession_relation`) and which characters belong to it
+    (`succession_relation_member`). Two umas' base affinity is the points of the groups they share;
+    the app does the sums (`affinity.rs`), and refreshes this file's contents itself (`live.rs`)."""
+    blocks = json_blocks(uma_data)
+    groups = pick(blocks, "relationType", "relationPoint")
+    members = pick(blocks, "charaId", "relationType")
+    by_chara: dict = {}
+    for m in members:
+        by_chara.setdefault(m["charaId"], []).append(m["relationType"])
+    out = {
+        "source": "uma.guide's data (the game's succession_relation and succession_relation_member tables)",
+        "fetched": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "points": {str(g["relationType"]): g["relationPoint"] for g in sorted(groups, key=lambda g: g["relationType"])},
+        "members": {str(c): sorted(set(t)) for c, t in sorted(by_chara.items())},
+    }
+    with open(os.path.join(OUT, "affinity.json"), "w", encoding="utf-8") as f:
+        json.dump(out, f, separators=(",", ":"))
+        f.write("\n")
+    print(f"affinity: {len(out['points'])} relation groups, {len(out['members'])} characters")
+
+
+SPARK_KINDS = {1: "blue", 2: "pink", 3: "green", 4: "white", 5: "race", 6: "scenario", 7: "bonus"}
+
+
+def write_sparks(uma_data: str) -> None:
+    """Every spark (the game's factors) by id, as uma.guide's Roster Viewer decodes them: a
+    finished uma's `factor_info_array` holds these ids (UmaExtractor's data.json)."""
+    rows = pick(json_blocks(uma_data), "id", "name", "rarity", "grade", "type")
+    out = [{"id": r["id"], "name": r["name"], "kind": SPARK_KINDS.get(r["type"], str(r["type"])), "stars": r["rarity"]} for r in sorted(rows, key=lambda r: r["id"])]
+    with open(os.path.join(OUT, "sparks.json"), "w", encoding="utf-8") as f:
+        f.write("[\n" + ",\n".join(json.dumps(r, ensure_ascii=False) for r in out) + "\n]\n")
+    print(f"sparks: {len(out)}")
+
+
+SADDLE = re.compile(r'(\d+):\{races:\[(.*?)\],name:"((?:[^"\\]|\\.)*)"\}')
+
+
+def write_saddles(uma_data: str) -> None:
+    """Every win record (saddle) by id: its name and the races it stands for (race ids as in
+    races.json; a title like the Triple Crown stands for several). A finished uma's
+    `win_saddle_id_array` holds these ids. uma.guide writes the table as a plain object literal,
+    read here as text."""
+    m = re.search(r"=\{1:\{races:\[", uma_data)
+    if not m:
+        raise SystemExit("couldn't find uma.guide's win table; its format may have changed")
+    depth, end = 0, None
+    for k in range(m.end() - len("{1:{races:["), len(uma_data)):
+        c = uma_data[k]
+        depth += c == "{"
+        depth -= c == "}"
+        if depth == 0:
+            end = k + 1
+            break
+    out = {}
+    for sid, races, name in SADDLE.findall(uma_data[m.start():end]):
+        out[sid] = {"name": unescape_template(name), "races": sorted({int(r) // 100 for r in re.findall(r"id:(\d+)", races)})}
+    with open(os.path.join(OUT, "saddles.json"), "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
+        f.write("\n")
+    print(f"saddles: {len(out)}")
+
+
 # ---------------------------------------------------------------------------
 # PvP meta: the community "PvP Deck & Uma Recommendation" Google Sheet (Lightning, Daptrius,
 # Henry). Its CSV exports are read as text. Card IDs come from the PvP Rankings tab; notes, LB
@@ -994,19 +1066,24 @@ def write_skill_tiers() -> None:
 
 def main():
     if "--only" in sys.argv:
-        # Refresh just one part: `--only umalator` (Moomoolator data), `--only cm` (CM schedule),
+        # Refresh just one part: `--only umalator` (Moomoolator data), `--only cm` (CM schedule), `--only affinity`,
         # `--only meta` (the PvP recommendation sheet) or `--only tiers` (the skill tier list).
         part = sys.argv[sys.argv.index("--only") + 1]
         if part == "umalator":
             write_umalator()
         elif part == "cm":
             write_cm_schedule(fetch(discover_chunks()["uma-data"]))
+        elif part == "affinity":
+            data = fetch(discover_chunks()["uma-data"])
+            write_affinity(data)
+            write_sparks(data)
+            write_saddles(data)
         elif part == "meta":
             write_pvp_meta()
         elif part == "tiers":
             write_skill_tiers()
         else:
-            raise SystemExit(f"unknown part {part}; use umalator, cm, meta or tiers")
+            raise SystemExit(f"unknown part {part}; use umalator, cm, affinity, meta or tiers")
         return
     if "--from" in sys.argv:
         d = sys.argv[sys.argv.index("--from") + 1]
@@ -1021,6 +1098,11 @@ def main():
         sources = {k: u.rsplit("/", 1)[-1] for k, u in urls.items()}
     build(chunks, sources)
     write_cm_schedule(chunks["uma-data"])
+    for write in (write_affinity, write_sparks, write_saddles):
+        try:
+            write(chunks["uma-data"])
+        except SystemExit as e:  # the rest of the build doesn't need them
+            print(f"couldn't write {write.__name__[6:]}: {e}")
     try:
         write_umalator()
     except Exception as e:  # the knowledge build is still useful without it

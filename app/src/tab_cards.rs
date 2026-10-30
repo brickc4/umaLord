@@ -1298,7 +1298,7 @@ impl App {
                 let path = dir.join(format!("{id}.webp"));
                 let part = dir.join(format!("{id}.webp.part"));
                 let url = format!("https://uma.guide/img/card/composite/tex_support_card_{id}_thumb.webp");
-                let mut cmd = std::process::Command::new("curl.exe");
+                let mut cmd = std::process::Command::new(crate::ask::CURL);
                 cmd.args(["-sSfL", "--max-time", "60", "-o"]).arg(&part).arg(&url);
                 crate::ask::hidden(&mut cmd);
                 let ok = cmd.status().is_ok_and(|s| s.success())
@@ -1342,6 +1342,12 @@ impl App {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         lb_widget(ui, card.lb, 7.0);
+                        if card.lb < 4 {
+                            let next = if card.lb == 3 { "MLB".to_string() } else { format!("LB{}", card.lb + 1) };
+                            if ui.small_btn(RichText::new("＋").color(p.weak)).on_hover_text(format!("Pulled another copy? Raise it to {next} and save it. Shortcut: +")).clicked() {
+                                self.raise_card(card.id);
+                            }
+                        }
                     });
                     let cap = card.rarity.max_level(card.lb);
                     ui.label(format!("Level {} / {cap}", card.level));

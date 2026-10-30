@@ -89,6 +89,8 @@ pub struct ToolEvent {
 pub enum OcEvent {
     Session(String),
     Text(String),
+    /// More of the text being streamed (Claude Code's partial messages): no paragraph break.
+    TextDelta(String),
     Tool(ToolEvent),
     Tokens(u64, u64),
     Error(String),
@@ -106,7 +108,7 @@ pub fn find_exe(root: Option<&Path>) -> Option<PathBuf> {
     std::env::var_os("PATH")?.to_str()?.split(if cfg!(windows) { ';' } else { ':' }).map(|d| Path::new(d).join(name)).find(|p| p.is_file())
 }
 
-fn command(exe: &Path) -> Command {
+pub(crate) fn command(exe: &Path) -> Command {
     let mut cmd = Command::new(exe);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     crate::ask::hidden(&mut cmd);
@@ -307,9 +309,12 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
     Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Download the pinned release with Windows' curl.exe, check its size and SHA-256, and extract
+/// Download the pinned Windows release with curl.exe, check its size and SHA-256, and extract
 /// opencode.exe into `dir`. Nothing is extracted unless the checksum matches.
 pub fn install_blocking(dir: &Path, progress: impl Fn(u64)) -> Result<PathBuf, String> {
+    if !cfg!(windows) {
+        return Err("The pinned OpenCode download is the Windows build. Install opencode with your package manager instead.".into());
+    }
     std::fs::create_dir_all(dir).map_err(|e| format!("couldn't create {}: {e}", dir.display()))?;
     let part = dir.join("opencode-download.zip.part");
     let _ = std::fs::remove_file(&part);

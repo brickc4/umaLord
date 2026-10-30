@@ -18,3 +18,7 @@
 /knowledge/digest/
 *.simulate.log
 __pycache__/
+
+# Nix dev shell
+/.direnv/
+/result

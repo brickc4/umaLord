@@ -40,6 +40,9 @@ pub const MODELS: [(&str, &str, bool, bool); 3] = [
 ];
 pub const EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
+/// A setup token works only through Claude Code: the API refuses it from other apps.
+const SETUP_TOKEN_NEEDS_CLAUDE_CODE: &str = "That's a Claude setup token (sk-ant-oat…), which only works through Claude Code. Install Claude Code (claude.com/claude-code) so umaLord can use it, or paste an API key from console.anthropic.com.";
+
 enum Auth {
     ApiKey(String),
     /// OAuth access token from `ant auth print-credentials --access-token`.
@@ -73,12 +76,15 @@ pub(crate) enum ToolState {
 pub(crate) enum Backend {
     /// OpenCode with a free model: no key, no cost.
     OpenCode,
-    /// The Claude API with the user's key.
+    /// Claude: through Claude Code when it's installed (its login, a setup token or an API key,
+    /// `ask_claude_code`), else the Claude API with the user's key.
     ClaudeApi,
 }
 
 pub(crate) struct OcState {
     pub exe: Option<std::path::PathBuf>,
+    /// Claude Code, which runs the Claude backend when it's installed.
+    pub claude_exe: Option<std::path::PathBuf>,
     pub models: Vec<String>,
     pub models_rx: Option<Receiver<Result<Vec<String>, String>>>,
     pub model: String,
@@ -185,6 +191,7 @@ impl AskState {
             backend,
             oc: OcState {
                 exe,
+                claude_exe: crate::ask_claude_code::find_exe(),
                 models: Vec::new(),
                 models_rx: None,
                 model: saved("opencode_model").unwrap_or_else(|| crate::ask_opencode::DEFAULT_MODEL.to_string()),
@@ -242,6 +249,20 @@ impl AskState {
         ant_token().map(Auth::Bearer)
     }
 
+    /// The key or token the user gave, in `auth`'s order; none means Claude Code's own login.
+    fn claude_key(&self) -> Option<String> {
+        std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+            .or_else(|| Some(self.key_input.trim().to_string()).filter(|k| !k.is_empty()))
+            .or_else(|| self.saved_key.clone())
+    }
+
+    /// The Claude backend runs through Claude Code when it's installed.
+    pub(crate) fn via_claude_code(&self) -> bool {
+        self.backend == Backend::ClaudeApi && self.oc.claude_exe.is_some()
+    }
+
     fn auth_label(&self) -> &'static str {
         if std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.trim().is_empty()) {
             "ANTHROPIC_API_KEY"
@@ -272,6 +293,17 @@ impl AskState {
         self.oc.session = None;
         self.oc.shown.clear();
         self.oc.draft_seen = None;
+        self.end_process();
+    }
+
+    /// End the conversation's assistant process (Claude Code keeps one warm between questions)
+    /// and forget its session, which belongs to that backend: after a backend switch or a new
+    /// conversation the next question starts fresh.
+    pub(crate) fn end_process(&mut self) {
+        self.oc.session = None;
+        if let Some(c) = self.oc.child.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            crate::ask_claude_code::kill(c);
+        }
     }
 }
 
@@ -283,6 +315,20 @@ pub(crate) fn hidden(cmd: &mut std::process::Command) -> &mut std::process::Comm
 #[cfg(not(windows))]
 pub(crate) fn hidden(cmd: &mut std::process::Command) -> &mut std::process::Command {
     cmd
+}
+
+/// Windows ships curl.exe since Windows 10 1803; elsewhere it's `curl` on PATH.
+pub(crate) const CURL: &str = if cfg!(windows) { "curl.exe" } else { "curl" };
+
+/// Write a file only this user can read: the temp folder is per-user on Windows, but /tmp is
+/// shared, and the header file holds the API key.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(bytes)
 }
 
 fn ant_token() -> Option<String> {
@@ -431,7 +477,7 @@ impl Acc {
     }
 }
 
-/// POST the body with curl.exe and stream the answer back. Headers go through a temp file so the
+/// POST the body with curl and stream the answer back. Headers go through a temp file so the
 /// key isn't on a command line.
 fn stream_request(body: Value, auth: Auth, betas: Vec<&'static str>, child: Arc<Mutex<Option<Child>>>, tx: Sender<StreamEvent>, wake: impl Fn() + Send + 'static) {
     std::thread::spawn(move || {
@@ -457,14 +503,14 @@ fn stream_request(body: Value, auth: Auth, betas: Vec<&'static str>, child: Arc<
         }
         let result = (|| -> Result<Value, String> {
             std::fs::write(&body_path, body.to_string()).map_err(|e| e.to_string())?;
-            std::fs::write(&head_path, headers.join("\n")).map_err(|e| e.to_string())?;
-            let mut cmd = std::process::Command::new("curl.exe");
+            write_private(&head_path, headers.join("\n").as_bytes()).map_err(|e| e.to_string())?;
+            let mut cmd = std::process::Command::new(CURL);
             cmd.args(["-sS", "-N", "--max-time", "900", "-X", "POST", API_URL, "-H", &format!("@{}", head_path.display()), "--data-binary", &format!("@{}", body_path.display()), "-w", "\n%{http_code}"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
             hidden(&mut cmd);
-            let mut proc = cmd.spawn().map_err(|e| format!("couldn't run curl.exe: {e}"))?;
+            let mut proc = cmd.spawn().map_err(|e| format!("couldn't run {CURL}: {e}"))?;
             let stdout = proc.stdout.take();
             let mut stderr = proc.stderr.take();
             *child.lock().unwrap_or_else(|p| p.into_inner()) = Some(proc);
@@ -525,6 +571,8 @@ impl App {
              - Use the tools for every game fact (aptitudes, growth, skill effects, card effects, events). Don't state game numbers from memory; if a tool can't confirm something, say it's unverified.\n\
              - Recommend owned umas and cards first. Read support effects at the owned level, not max level. A support card can't go in the deck of its own character, and a deck holds one card per character plus one borrowed friend card.\n\
              - Label every claim as data (game data from the tools), simulation (simulator output, or a plan's Simulation section), community meta (the meta sheet, get_cm_meta) or opinion. Check insights.md and results/ for the account's real results before giving an opinion, and say how confident you are.\n\
+             - For goals by mode (Champions Meeting, Team Trials, League of Heroes, Legend Races) and which training scenario suits what, read knowledge/modes.md; a broad \"get competitive\" ask covers the next CM, Team Trials and the parenting that feeds both.\n\
+             - For parents and parenting, read knowledge/parenting.md first and follow its method (calendar → runner → the lineage she needs → what the account has → a queue of parent runs with odds and careers → budget). get_affinity, rank_legacies, plan_lineage and parent_run_odds work out affinity, start aptitudes and spark odds from the game's own rules; never estimate them, and label their results as calculated (exact, from the game's rules), not simulation. Work out the goal from the account and the calendar instead of asking.\n\
              - For how the game works (race mechanics, Wit, HP, Team Trials scoring, the Champions Meeting format, sparks, Grand Concert), courses and skill advice, read knowledge/mechanics.md, knowledge/racecourses.md and knowledge/skills.md with read_note: sourced notes, each section naming its source. get_skill includes the community skill tier list; quote it as community opinion.\n\n\
              Building and testing a career, when the user asks for a plan, a deck, skills or a simulation:\n\
              1. Understand the goal: the event, the trainee or style, what matters to them. Ask only if it's genuinely unclear; otherwise say what you assumed.\n\
@@ -571,6 +619,12 @@ impl App {
             self.ask.status = Some(("No API key. Set ANTHROPIC_API_KEY, enter one in ⚙ Settings → AI assistant, or log in with the ant CLI.".into(), true));
             return;
         };
+        if let Auth::ApiKey(k) = &auth
+            && crate::ask_claude_code::is_setup_token(k)
+        {
+            self.ask.status = Some((SETUP_TOKEN_NEEDS_CLAUDE_CODE.into(), true));
+            return;
+        }
         if self.ask.system.is_none() {
             self.ask.system = Some(self.system_prompt());
         }
@@ -885,8 +939,8 @@ impl App {
             }
             self.ask.messages.push(json!({"role": "user", "content": results}));
         }
-        if let Some(mut child) = self.ask.oc.child.lock().unwrap_or_else(|p| p.into_inner()).take() {
-            let _ = child.kill();
+        if let Some(child) = self.ask.oc.child.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            crate::ask_claude_code::kill(child);
         }
         self.ask.status = Some(("Stopped.".into(), true));
         self.finish_question(ctx);
@@ -908,7 +962,7 @@ impl App {
         self.ask.status = None;
         self.agent.sims = 0;
         self.agent.open_after = None;
-        if self.ask.backend == Backend::OpenCode {
+        if self.ask.backend == Backend::OpenCode || self.ask.via_claude_code() {
             self.send_opencode(ctx, q);
             return;
         }
@@ -960,9 +1014,18 @@ impl App {
     // -----------------------------------------------------------------------
     // OpenCode
 
+    /// Ask OpenCode, or Claude through Claude Code: both run as a process in the umaLord folder
+    /// with umaLord's tools over MCP, and report back as `OcEvent`s.
     fn send_opencode(&mut self, ctx: &egui::Context, q: String) {
-        let (Some(exe), Some(root)) = (self.ask.oc.exe.clone(), self.root.clone()) else {
-            self.ask.status = Some(("OpenCode isn't installed: tools/opencode/opencode.exe is missing.".into(), true));
+        let claude = self.ask.via_claude_code();
+        let exe = if claude { self.ask.oc.claude_exe.clone() } else { self.ask.oc.exe.clone() };
+        let (Some(exe), Some(root)) = (exe, self.root.clone()) else {
+            let msg = match (self.root.is_some(), claude) {
+                (false, _) => "The umaLord folder wasn't found, so the assistant has nothing to read.",
+                (true, true) => "Claude Code isn't installed: claude isn't on PATH.",
+                (true, false) => "OpenCode isn't installed: it isn't in tools/opencode or on PATH.",
+            };
+            self.ask.status = Some((msg.into(), true));
             return;
         };
         self.write_digest();
@@ -978,6 +1041,22 @@ impl App {
         self.ask.oc.plans_before = self.plan_times();
         let ctx = ctx.clone();
         self.ask.oc.answer_open = false;
+        if claude {
+            let mcp = std::env::current_exe().ok().map(|me| crate::ask_claude_code::mcp_config(&me, &root, bridge.as_deref()));
+            let request = crate::ask_claude_code::Request {
+                exe,
+                root,
+                model: MODELS[self.ask.model].0.to_string(),
+                effort: EFFORTS[self.ask.effort].to_string(),
+                credential: crate::ask_claude_code::Credential::from_key(self.ask.claude_key().as_deref()),
+                session: self.ask.oc.session.clone(),
+                question: q,
+                mcp,
+            };
+            self.ask.oc.rx = Some(crate::ask_claude_code::ask(request, self.ask.oc.child.clone(), move || ctx.request_repaint()));
+            self.ask.status = None;
+            return;
+        }
         let mcp = std::env::current_exe().ok().map(|exe| crate::ask_opencode::mcp_config(&exe, &root, bridge.as_deref()));
         self.ask.oc.rx = Some(crate::ask_opencode::ask(
             exe,
@@ -1090,6 +1169,13 @@ impl App {
         ui.label(semibold("OpenCode isn't installed yet", 16.0));
         ui.label(RichText::new("It answers your questions for free, with no key and no account.").color(p.weak));
         ui.add_space(6.0);
+        // The pinned download is the Windows build; elsewhere OpenCode comes from the package
+        // manager (it's in the Nix dev shell) and `find_exe` picks it up from PATH.
+        if !cfg!(windows) {
+            ui.label("Install `opencode` with your package manager so it's on PATH, then restart umaLord.");
+            ui.label(RichText::new("With Nix: it's in this repo's dev shell (nix develop), or run nix shell nixpkgs#opencode.").size(11.5).color(p.weak));
+            return;
+        }
         if self.ask.oc.install_rx.is_some() {
             let done = self.ask.oc.install_progress;
             let bar = egui::ProgressBar::new((done as f32 / ZIP_SIZE as f32).min(1.0))
@@ -1168,6 +1254,13 @@ impl App {
                     self.ask.tokens_in += i;
                     self.ask.tokens_out += o;
                 }
+                OcEvent::TextDelta(t) => match self.ask.turns.last_mut() {
+                    Some(Turn::Assistant(last)) if self.ask.oc.answer_open => last.push_str(&t),
+                    _ => {
+                        self.ask.turns.push(Turn::Assistant(t));
+                        self.ask.oc.answer_open = true;
+                    }
+                },
                 OcEvent::Text(t) => match self.ask.turns.last_mut() {
                     Some(Turn::Assistant(last)) if self.ask.oc.answer_open => {
                         last.push_str("\n\n");
@@ -1178,14 +1271,18 @@ impl App {
                         self.ask.oc.answer_open = true;
                     }
                 },
-                OcEvent::Error(msg) => self.ask.status = Some((format!("OpenCode: {msg}"), true)),
+                OcEvent::Error(msg) => {
+                    let who = if self.ask.via_claude_code() { "Claude Code" } else { "OpenCode" };
+                    self.ask.status = Some((format!("{who}: {msg}"), true));
+                }
                 OcEvent::Done(result) => {
                     self.ask.oc.rx = None;
                     self.bridge_poll(ctx, true);
                     if let Err(msg) = result {
                         self.ask.status = Some((msg, true));
                     } else if !self.ask.turns.iter().rev().take_while(|t| !matches!(t, Turn::User(_))).any(|t| matches!(t, Turn::Assistant(_))) && self.ask.status.is_none() {
-                        self.ask.status = Some(("OpenCode finished without an answer. Try again or pick another model.".into(), true));
+                        let who = if self.ask.via_claude_code() { "Claude Code" } else { "OpenCode" };
+                        self.ask.status = Some((format!("{who} finished without an answer. Try again or pick another model."), true));
                     }
                     // Questions the server asked and nobody answered are moot now.
                     for t in &mut self.ask.turns {
@@ -1271,7 +1368,11 @@ impl App {
                             crate::ui_util::chibi(ui, 5, 110.0);
                         }
                         ui.label(semibold("What do you want to know?", 20.0));
-                        let who = if self.ask.backend == Backend::OpenCode { "A free model (via OpenCode)" } else { "Claude" };
+                        let who = match self.ask.backend {
+                            Backend::OpenCode => "A free model (via OpenCode)",
+                            Backend::ClaudeApi if self.ask.via_claude_code() => "Claude (via Claude Code)",
+                            Backend::ClaudeApi => "Claude",
+                        };
                         ui.label(
                             RichText::new(format!(
                                 "{who} looks things up in your roster, the uma.guide data, your plans and results, labels what is data and what is opinion, and can build a plan and race it in the simulator. You can undo every change it makes."
@@ -1504,6 +1605,10 @@ impl App {
         filter_heading(ui, "Answered by");
         let (who, detail) = match self.ask.backend {
             Backend::OpenCode => ("🆓 OpenCode · free model", self.ask.oc.model.trim_start_matches("opencode/").to_string()),
+            Backend::ClaudeApi if self.ask.via_claude_code() => {
+                let cred = crate::ask_claude_code::Credential::from_key(self.ask.claude_key().as_deref());
+                ("✳ Claude · via Claude Code", format!("{} · {}", MODELS[self.ask.model].1, cred.describe()))
+            }
             Backend::ClaudeApi => ("🔑 Claude API · your key", MODELS[self.ask.model].1.to_string()),
         };
         ui.label(semibold(who, 14.0));
@@ -1531,6 +1636,8 @@ impl App {
         }
         if s.backend == Backend::OpenCode {
             ui.label(RichText::new("Free models cost nothing; the count is for interest.").size(11.5).color(p.weak));
+        } else if s.via_claude_code() && !matches!(crate::ask_claude_code::Credential::from_key(s.claude_key().as_deref()), crate::ask_claude_code::Credential::ApiKey(_)) {
+            ui.label(RichText::new("On a Claude Pro or Max login or setup token, this counts against your plan's usage; a Console login is billed per use.").size(11.5).color(p.weak));
         }
         if ui.add_enabled(!busy, egui::Button::new("🗑 New conversation")).clicked() {
             s.clear();
@@ -1613,24 +1720,76 @@ impl App {
         });
         ui.label(RichText::new("Higher effort thinks longer and costs more.").size(12.0).color(p.weak));
 
-        filter_heading(ui, "API key");
+        filter_heading(ui, "Sign in");
+        App::claude_code_status(ui, s);
+        let typed = s.key_input.trim().to_string();
         let has_key = s.auth_label() != "no key set yet";
-        badge(ui, format!("{} {}", if has_key { "✔" } else { "✖" }, s.auth_label()), if has_key { p.accent } else { pal(ui).warn });
-        ui.add_space(4.0);
-        ui.add(egui::TextEdit::singleline(&mut s.key_input).password(true).hint_text("sk-ant-…").desired_width(f32::INFINITY));
-        ui.tick(&mut s.remember, "Remember on this PC");
-        if s.remember && !s.key_input.trim().is_empty() && ui.button("💾 Save key").clicked() {
-            let ok = crate::settings::set("api_key", json!(s.key_input.trim()));
-            if ok {
-                s.saved_key = Some(s.key_input.trim().to_string());
-            }
-            s.status = Some((if ok { "Key saved.".into() } else { "Couldn't save the key.".into() }, !ok));
+        if s.oc.claude_exe.is_some() {
+            let cred = crate::ask_claude_code::Credential::from_key(s.claude_key().as_deref());
+            badge(ui, format!("✔ Using {}", cred.describe()), p.accent);
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Leave the box empty to use the account Claude Code is signed in with. Or paste a setup token to use your Claude account (Pro or Max) without signing Claude Code in, or an API key (sk-ant-api…) to pay per use.")
+                    .size(12.0)
+                    .color(p.weak),
+            );
+        } else {
+            badge(ui, format!("{} {}", if has_key { "✔" } else { "✖" }, s.auth_label()), if has_key { p.accent } else { pal(ui).warn });
+            ui.add_space(4.0);
         }
-        if s.saved_key.is_some() && ui.small_btn("Forget saved key").clicked() {
+        ui.add(egui::TextEdit::singleline(&mut s.key_input).password(true).hint_text("sk-ant-api… or sk-ant-oat…").desired_width(f32::INFINITY));
+        let env_key = std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.trim().is_empty());
+        let shown = if typed.is_empty() { s.saved_key.clone().unwrap_or_default() } else { typed.clone() };
+        if env_key && !typed.is_empty() {
+            ui.label(RichText::new("ANTHROPIC_API_KEY is set in the environment, so it's used instead of what you paste here.").size(12.0).color(pal(ui).warn));
+        } else if crate::ask_claude_code::is_setup_token(&shown) {
+            let (text, color) = if s.oc.claude_exe.is_some() {
+                ("That's a setup token: umaLord hands it to Claude Code, which runs on your Claude account.", p.weak)
+            } else {
+                (SETUP_TOKEN_NEEDS_CLAUDE_CODE, pal(ui).warn)
+            };
+            ui.label(RichText::new(text).size(12.0).color(color));
+        }
+        ui.tick(&mut s.remember, "Remember on this PC");
+        if s.remember && !typed.is_empty() && ui.button("💾 Save").clicked() {
+            let ok = crate::settings::set("api_key", json!(typed));
+            if ok {
+                s.saved_key = Some(typed.clone());
+            }
+            s.status = Some((if ok { "Saved.".into() } else { "Couldn't save it.".into() }, !ok));
+        }
+        if s.saved_key.is_some() && ui.small_btn("Forget the saved key or token").clicked() {
             crate::settings::set("api_key", Value::Null);
             s.saved_key = None;
         }
-        ui.label(RichText::new("Get a key at console.anthropic.com. Saved keys are stored in plain text under %APPDATA%\\umaLord.").size(11.5).color(p.weak));
+        egui::CollapsingHeader::new("How to get a setup token or an API key").default_open(false).show(ui, |ui| {
+            for line in [
+                "Setup token (your Claude account): install Claude Code, run `claude setup-token` in a terminal, sign in in the browser it opens, and paste the sk-ant-oat01-… it prints. It lasts a year.",
+                "Claude Code login: run `claude` in a terminal and type /login once; then leave the box empty.",
+                "API key (billed per use): create one at console.anthropic.com → API Keys.",
+            ] {
+                ui.label(RichText::new(line).size(12.0).color(p.weak));
+            }
+        });
+        ui.label(RichText::new("Saved keys and tokens are stored in plain text in your umaLord settings folder.").size(11.5).color(p.weak));
+    }
+
+    /// Whether Claude Code is installed, which lets Claude run on a Claude account.
+    fn claude_code_status(ui: &mut egui::Ui, s: &mut AskState) {
+        let p = pal(ui);
+        let busy = s.oc.rx.is_some() || s.stream.is_some();
+        ui.horizontal_wrapped(|ui| {
+            match &s.oc.claude_exe {
+                Some(exe) => _ = ui.label(RichText::new("✳ Claude Code found: questions run through it.").size(12.5)).on_hover_text(exe.display().to_string()),
+                None => _ = ui.label(RichText::new("Claude Code isn't installed, so only an API key works. Install it from claude.com/claude-code to use your Claude account.").size(12.5).color(p.warn)),
+            }
+            let look = ui.add_enabled(!busy, egui::Button::new("🔄 Look again").small()).on_hover_text("Check PATH for claude again, after installing it").on_disabled_hover_text("Wait for the answer to finish");
+            if look.clicked() {
+                s.oc.claude_exe = crate::ask_claude_code::find_exe();
+                s.end_process();
+            }
+        });
+        ui.add_space(4.0);
     }
 
     /// Settings → AI assistant: which writes may happen without the approval card.

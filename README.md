@@ -44,7 +44,8 @@
 - 📈 **Race sim charts**: the gap of every race, where along the course the lengths are won, speed and HP of the typical race with a replay, a timeline of every skill, what each skill is worth and where the next training points matter.
 - 🃏 **Compare two cards** side by side at your levels, filter cards by a skill they teach or an effect's minimum, and see the community tier list on every skill.
 - 🧩 **Setup in minutes**: click what you own on art grids, paste a list, or load a profile file. ⚙ Settings → Save my data puts your whole account in one file.
-- ⌨️ **Keyboard shortcuts**: Ctrl+1–4 for the tabs, Ctrl+F to search, Ctrl+S to save the plan, F5 to reload, ? for help.
+- 🌱 **Your finished umas as parents**: import UmaExtractor's data.json (or run `tools/read_veterans.py` on Linux) and every finished uma lands with its sparks, parents and G1 wins; affinity for any lineage comes from the game's own tables.
+- ⌨️ **Keyboard shortcuts**: Ctrl+1–4 for the tabs, Ctrl+F to search, Ctrl+S to save the plan, F5 to reload, ? for help, + for a pulled copy.
 - 🤖 **MCP server**: the assistant's tools work in Claude Code and Claude Desktop too ([below](#-use-it-with-claude-code)).
 
 </details>
@@ -118,6 +119,10 @@ cargo build --release
 ```
 
 The exe is `app/target/release/umalord.exe`. `cargo test --release` runs the tests, including a check of the race engine against umalator.app.
+
+**Linux (Wayland) and macOS:** build it the same way with the standard Rust toolchain (`cargo build --release` in `app/`, then `cargo run --release`). Linux needs a Wayland session and `curl`, `xdg-open` and fontconfig; the app bundles its symbol fonts, and a Japanese font (such as Noto Sans CJK JP) shows event text. Settings live in `~/.config/umaLord` on Linux and `~/Library/Application Support/umaLord` on macOS. The Ask tab's free backend uses `opencode` from your PATH there, since the in-app download is the Windows build. CI builds and tests all three; macOS hasn't been tried on a real Mac yet.
+
+**Nix (Linux):** `nix run github:benashby/umaLord` runs it, and the flake's `packages.default` installs it with a desktop entry. The package keeps its data in `~/.local/share/umaLord` (`$UMALORD_ROOT` overrides it), refreshing the game data there when the package changes and leaving your account alone. `nix develop` (or `direnv allow` with a `use flake` `.envrc`) gives a dev shell with the toolchain, the Wayland and OpenGL libraries, a Japanese font, Python and `opencode`.
 
 Game data lives in `knowledge/data/`. To refresh it from uma.guide, umalator.app, the meta sheet and the skill tier list (needs Python 3):
 

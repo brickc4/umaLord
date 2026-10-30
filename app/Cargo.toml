@@ -8,7 +8,7 @@ repository = "https://github.com/brickc4/umaLord"
 publish = false
 
 [dependencies]
-eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "clipboard"] }
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "clipboard", "wayland"] }
 egui_commonmark = { version = "0.26.0", default-features = false, features = ["pulldown_cmark"] }
 egui_extras = { version = "0.37.0", default-features = false, features = ["file", "image"] }
 flate2 = "1.1.10"

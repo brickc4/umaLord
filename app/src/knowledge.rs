@@ -324,6 +324,25 @@ pub struct RaceInfo {
     pub track_id: Option<u32>,
 }
 
+/// A spark (the game's factor) as a finished uma's data names it (`sparks.json`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SparkInfo {
+    pub id: u32,
+    pub name: String,
+    /// blue, pink, green, white, race, scenario or bonus.
+    pub kind: String,
+    pub stars: u8,
+}
+
+/// A win record (the game's saddle): one race, or a title such as the Triple Crown that stands
+/// for several (`saddles.json`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Saddle {
+    pub name: String,
+    /// Race ids, as in races.json.
+    pub races: Vec<u32>,
+}
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct GlossaryEntry {
     pub term: String,
@@ -678,6 +697,11 @@ pub struct Knowledge {
     pub pvp_meta: Option<crate::meta::PvpMeta>,
     /// The community skill tier list (`skill_tiers.json`).
     pub skill_tiers: Option<crate::notes::SkillTiers>,
+    /// The game's affinity tables (`affinity.json`, or a newer copy the live refresh fetched).
+    pub affinity: crate::affinity::AffinityTable,
+    /// Spark (factor) ids and win record (saddle) ids, for decoding finished umas.
+    pub sparks: HashMap<u32, SparkInfo>,
+    pub saddles: HashMap<u32, Saddle>,
     /// The sourced glossary and tips from `knowledge/mechanics.md`.
     pub terms: Vec<crate::notes::Term>,
     pub tips: Vec<crate::notes::Tip>,
@@ -690,6 +714,20 @@ pub struct Knowledge {
 fn read<T: for<'de> Deserialize<'de>>(dir: &Path, file: &str) -> Result<T, String> {
     let text = std::fs::read_to_string(dir.join(file)).map_err(|e| format!("{file}: {e}"))?;
     serde_json::from_str(&text).map_err(|e| format!("{file}: {e}"))
+}
+
+impl Knowledge {
+    /// The G1 races a finished uma's win records stand for, by races.json name (a race won at two
+    /// venues, or in two years, is one name). Affinity counts these.
+    pub fn g1_wins(&self, saddles: &[u32]) -> std::collections::BTreeSet<String> {
+        saddles
+            .iter()
+            .filter_map(|s| self.saddles.get(s))
+            .flat_map(|s| s.races.iter())
+            .filter_map(|id| self.races.iter().find(|r| r.id == *id && r.grade == "G1"))
+            .map(|r| r.name.clone())
+            .collect()
+    }
 }
 
 /// The day the Global server opened.
@@ -731,6 +769,9 @@ impl Knowledge {
         k.cm_schedule = read(dir, "cm_schedule.json").unwrap_or_default();
         k.pvp_meta = read(dir, "pvp_meta.json").ok();
         k.skill_tiers = crate::notes::SkillTiers::load(&dir.join("skill_tiers.json"));
+        k.affinity = read(dir, "affinity.json").unwrap_or_default();
+        k.sparks = read::<Vec<SparkInfo>>(dir, "sparks.json").unwrap_or_default().into_iter().map(|s| (s.id, s)).collect();
+        k.saddles = read(dir, "saddles.json").unwrap_or_default();
         Ok(k)
     }
 
@@ -798,6 +839,9 @@ impl Knowledge {
             scenarios: None,
             pvp_meta: None,
             skill_tiers: None,
+            affinity: Default::default(),
+            sparks: HashMap::new(),
+            saddles: HashMap::new(),
             terms: Vec::new(),
             tips: Vec::new(),
             umalator_built: None,

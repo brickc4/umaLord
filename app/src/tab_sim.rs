@@ -1476,7 +1476,7 @@ impl App {
                         Err(e) => self.toast(e, crate::ui_util::ToastKind::Warn),
                     }
                 }
-                if ui.button("🖼 Save chart as PNG").on_hover_text("Save the results shown on the tab you pick next (Overview, Race…) as a picture in Pictures\\umaLord").clicked() {
+                if ui.button("🖼 Save chart as PNG").on_hover_text("Save the results shown on the tab you pick next (Overview, Race…) as a picture in your Pictures folder, under umaLord").clicked() {
                     self.sim.save_png = true;
                 }
                 if self.sim.from_plan && ui.button("💾 Save to plan").on_hover_text("Writes these results into the plan's ## Simulation section").clicked() {
@@ -1492,7 +1492,7 @@ impl App {
     /// Save the results area as a PNG in Pictures\umaLord, by cropping a screenshot.
     fn save_results_png(&self, ctx: &egui::Context) {
         let Some(rect) = self.sim.results_rect else { return };
-        let Some(dir) = std::env::var_os("USERPROFILE").map(|h| std::path::PathBuf::from(h).join("Pictures").join("umaLord")) else { return };
+        let Some(dir) = crate::settings::user_dir("Pictures").map(|d| d.join("umaLord")) else { return };
         let stamp = crate::live::fmt_local(crate::live::now()).replace([':', ' ', ','], "-");
         let path = dir.join(format!("race-sim-{stamp}.png"));
         let ppp = ctx.pixels_per_point();

@@ -293,6 +293,10 @@ impl App {
     /// Apply roster changes: each account file is read and written once. With `record`, the
     /// changes can be undone as one action. Returns how many rows changed.
     pub(crate) fn apply_edits(&mut self, edits: &[Edit], record: bool) -> Result<usize, String> {
+        // UMALORD_PROFILE shows a profile in memory; writing would land in the real account files.
+        if std::env::var_os("UMALORD_PROFILE").is_some() {
+            return Err("This roster is a profile shown without loading it (UMALORD_PROFILE), so it can't be edited.".into());
+        }
         let root = self.root.clone().ok_or("umaLord folder not found.")?;
         let today = crate::ui_util::local_today();
         let (up, cp) = (root.join(crate::data::UMAS_FILE), root.join(crate::data::CARDS_FILE));
@@ -395,15 +399,58 @@ impl App {
         }
     }
 
+    /// Pulled another copy of an owned card: one more LB, saved at once, with Undo. The level
+    /// stays: a copy raises the cap, not the level.
+    pub(crate) fn raise_card(&mut self, id: u32) {
+        let Some(c) = self.owned_card(id).cloned() else { return };
+        if c.lb >= 4 {
+            self.toast(format!("{} [{}] is already maxed (MLB).", c.uma, c.title), ToastKind::Info);
+            return;
+        }
+        let lb = c.lb + 1;
+        let now = if lb >= 4 { "maxed (MLB)".to_string() } else { format!("LB{lb}") };
+        self.raise(&[Edit::Card { id, lb, level: Some(c.level) }], format!("{} [{}] is now {now}.", c.uma, c.title));
+    }
+
+    /// Pulled another copy of an owned uma: one more star, saved at once, with Undo.
+    pub(crate) fn raise_uma(&mut self, id: u32) {
+        let Some(u) = self.owned_uma(id).cloned() else { return };
+        if u.stars >= 5 {
+            self.toast(format!("{} [{}] already has 5 stars.", u.name, u.outfit), ToastKind::Info);
+            return;
+        }
+        let stars = u.stars + 1;
+        self.raise(&[Edit::Uma { id, stars, potential: u.potential }], format!("{} [{}] is now {stars}★.", u.name, u.outfit));
+    }
+
+    fn raise(&mut self, edits: &[Edit], done: String) {
+        match self.apply_edits(edits, true) {
+            Ok(_) => {
+                self.finish_setup_edits();
+                self.toast_action(done, ToastKind::Success, "Undo", crate::ui_util::ToastAction::Undo);
+            }
+            Err(e) => self.toast(e, ToastKind::Error),
+        }
+    }
+
     pub(crate) fn roster_edited(&mut self) {
         self.reload_roster();
         self.planner.rank_cache.borrow_mut().clear();
         *self.planner.career_cache.borrow_mut() = None;
     }
 
-    /// A `.umalord.json` dropped on the window opens it in setup's Import step.
+    /// A `.umalord.json` dropped on the window opens it in setup's Import step; any other `.json`
+    /// is taken for finished umas (UmaExtractor's data.json) and imported.
     pub(crate) fn take_dropped_profile(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        if let Some(path) = dropped.iter().find(|p| {
+            let n = p.to_string_lossy().to_lowercase();
+            n.ends_with(".json") && !n.ends_with(profile::EXT)
+        }) {
+            let r = self.import_veterans(path);
+            self.toast_flag(r.map_or_else(|e| (e, true), |m| (m, false)));
+            return;
+        }
         let Some(path) = dropped.into_iter().find(|p| p.to_string_lossy().to_lowercase().ends_with(profile::EXT)) else { return };
         self.open_setup(Step::Import);
         match profile::read(&path) {
@@ -774,7 +821,7 @@ impl App {
                 {
                     let dir = root.join(profile::DIR);
                     let _ = std::fs::create_dir_all(&dir);
-                    let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+                    let _ = crate::ui_util::show_in_folder(&dir);
                 }
                 if ui.button("🔄 Look again").clicked() {
                     self.onboarding.found = None;
@@ -1045,6 +1092,28 @@ pub(crate) mod tests {
         a.undo_setup();
         assert!(a.owned_card(30076).is_none() && a.owned_uma(100601).is_none(), "the first action added both");
         assert!(a.onboarding.undo.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Pulling a copy adds one LB (level kept) or one star, saved and undoable, and stops at the top.
+    #[test]
+    fn raise_on_pull() {
+        let (mut a, dir) = scratch_app("raise");
+        a.apply_edits(&[Edit::Card { id: 30076, lb: 2, level: Some(40) }, Edit::Uma { id: 100601, stars: 4, potential: 2 }], false).unwrap();
+        a.raise_card(30076);
+        assert_eq!(a.owned_card(30076).map(|c| (c.lb, c.level)), Some((3, 40)), "the level stays");
+        a.raise_card(30076);
+        a.raise_card(30076);
+        assert_eq!(a.owned_card(30076).map(|c| c.lb), Some(4), "MLB is the top");
+        a.raise_uma(100601);
+        a.raise_uma(100601);
+        assert_eq!(a.owned_uma(100601).map(|u| (u.stars, u.potential)), Some((5, 2)), "5 stars is the top; potential stays");
+        a.reload_roster();
+        assert_eq!(a.owned_card(30076).map(|c| c.lb), Some(4), "saved to the account file");
+        a.undo_setup();
+        assert_eq!(a.owned_uma(100601).map(|u| u.stars), Some(4));
+        a.undo_setup();
+        assert_eq!(a.owned_card(30076).map(|c| (c.lb, c.level)), Some((3, 40)));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -5,8 +5,10 @@
 //! Usage: `umalord [path-to-umaLord-folder]`. Without a path it searches upward from the
 //! current dir and the exe for `account/support_cards.md`.
 
+mod affinity;
 mod agent;
 mod ask;
+mod ask_claude_code;
 mod ask_opencode;
 mod career;
 mod data;
@@ -16,6 +18,7 @@ mod course_notes;
 mod digest;
 mod home;
 mod knowledge;
+mod lineage;
 mod live;
 mod meta;
 mod notes;
@@ -41,6 +44,7 @@ mod tab_skills;
 mod tab_umas;
 mod theme;
 mod ui_util;
+mod veterans;
 
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -85,6 +89,20 @@ fn main() -> eframe::Result {
         let result = agent::mcp::serve(stdin.lock(), std::io::stdout(), move || agent::mcp::headless_app(root));
         std::process::exit(i32::from(result.is_err()));
     }
+    // `umalord --import-veterans <data.json>`: import finished umas (UmaExtractor's format, or
+    // tools/read_veterans.py's) into account/veterans.json and account/parents.md.
+    if args.first().is_some_and(|a| a == "--import-veterans") {
+        let result = args.get(1).map(PathBuf::from).ok_or_else(|| "usage: umalord --import-veterans <data.json>".to_string()).and_then(|p| {
+            let root = data::find_root(None).ok_or("umaLord folder not found.")?;
+            App::new(Some(root)).import_veterans(&p)
+        });
+        let (msg, code) = match result {
+            Ok(m) => (m, 0),
+            Err(e) => (e, 1),
+        };
+        println!("{msg}");
+        std::process::exit(code);
+    }
     // `umalord --export-profile [name]`: save the account to profiles/<name>-<date>.umalord.json.
     // `umalord --start-over [name]`: back the account up to profiles/backups/, then empty it.
     if let Some(cmd) = args.first().and_then(|a| a.to_str()).filter(|a| matches!(*a, "--export-profile" | "--start-over")) {
@@ -113,6 +131,9 @@ fn main() -> eframe::Result {
         .unwrap_or([1400.0, 900.0]);
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("umaLord")
+        // Wayland matches the window to umalord.desktop (and its icon) by this id; it ignores
+        // with_icon.
+        .with_app_id("umalord")
         .with_inner_size(size)
         .with_min_inner_size([960.0, 600.0]);
     if let Some(icon) = window_icon() {
@@ -606,6 +627,7 @@ pub(crate) const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+S", "Save the plan (on Career → Plan)"),
     ("F5", "Reload your roster, game data and plans from disk"),
     ("Esc", "Close Help, a dialog, or the details panel"),
+    ("+", "Pulled another copy: one more LB or star for the open card or uma"),
     ("?", "Open this Help"),
 ];
 
@@ -1011,7 +1033,10 @@ impl App {
             return None;
         }
         let path = self.root.as_ref()?.join("app").join("assets").join(sub).join(format!("{id}.webp"));
-        Some(format!("file:///{}", path.to_string_lossy().replace('\\', "/")))
+        // file:///C:/… on Windows, file:///home/… elsewhere; a folder given as `.` must not
+        // become file:///./….
+        let path = std::path::absolute(&path).unwrap_or(path).to_string_lossy().replace('\\', "/");
+        Some(format!("file://{}{path}", if path.starts_with('/') { "" } else { "/" }))
     }
 
     pub fn owned_card(&self, id: u32) -> Option<&SupportCard> {
@@ -1187,18 +1212,19 @@ impl App {
             }
         }
         match ui_util::show_toasts(ctx) {
-            // Show the file selected in Explorer (or open a folder).
+            // Show the file selected in the file manager (or open a folder).
             Some(ui_util::ToastAction::Open(path)) => {
-                let result = if path.is_dir() {
-                    std::process::Command::new("explorer").arg(&path).spawn()
-                } else {
-                    std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn()
-                };
-                if let Err(e) = result {
+                if let Err(e) = ui_util::show_in_folder(&path) {
                     self.toast(format!("Couldn't open {}: {e}", path.display()), ui_util::ToastKind::Error);
                 }
             }
-            Some(ui_util::ToastAction::Undo) => self.undo_setup(),
+            Some(ui_util::ToastAction::Undo) => {
+                self.undo_setup();
+                // Setup writes the digest when it closes; elsewhere, now.
+                if !self.onboarding.open {
+                    self.finish_setup_edits();
+                }
+            }
             Some(ui_util::ToastAction::OpenPlan(path)) => {
                 if self.open_plan_file(&path) {
                     self.go_career(CareerTab::Plan);
@@ -1209,7 +1235,7 @@ impl App {
     }
 
     /// Keyboard shortcuts: Ctrl+1…4 tabs, Ctrl+F search, Ctrl+S save the plan, F5 reload,
-    /// Esc close, ? help. Listed in Help (`SHORTCUTS`).
+    /// Esc close, ? help, + a pulled copy. Listed in Help (`SHORTCUTS`).
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, KeyboardShortcut, Modifiers};
         let typing = ctx.egui_wants_keyboard_input();
@@ -1240,6 +1266,28 @@ impl App {
         // `?` opens Help, unless a text box is taking the keys.
         if !typing && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "?"))) {
             self.help_open = true;
+        }
+        // `+` on an open uma or card: pulled another copy. Not behind a dialog, and once per press
+        // (a held key repeats its Text event).
+        let dialog = self.help_open || self.settings.open || self.onboarding.paste.open || self.cards.add.open || self.cards.compare_open;
+        let plus = ctx.input(|i| {
+            i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "+"))
+                && !i.events.iter().any(|e| matches!(e, egui::Event::Key { repeat: true, .. }))
+        });
+        if plus && !typing && !dialog && !self.onboarding.open && self.tab == Tab::Collection {
+            match self.collection_tab {
+                CollectionTab::Umas => {
+                    if let Some(id) = self.umas.selected {
+                        self.raise_uma(id);
+                    }
+                }
+                CollectionTab::Cards => {
+                    if let Some(id) = self.cards.selected {
+                        self.raise_card(id);
+                    }
+                }
+                CollectionTab::Skills => {}
+            }
         }
         // Esc closes the topmost thing: a dropdown or text box handles its own, then Help, a
         // dialog, then the detail panel.
@@ -1657,7 +1705,7 @@ impl App {
     /// One frame of the whole window; separate from eframe so tests can time it headless.
     fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        // System mode follows Windows, so what "dark" means can change while the app runs.
+        // System mode follows the OS, so what "dark" means can change while the app runs.
         self.dark = theme::is_dark(&ctx);
         ui_util::set_pose(self.pose());
         self.shortcuts(&ctx);
