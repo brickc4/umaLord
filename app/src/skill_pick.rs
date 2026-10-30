@@ -83,13 +83,17 @@ pub(crate) struct PickCtx {
 }
 
 impl App {
+    /// Whether a skill hits rivals. The simulator's own data says so where it has the skill
+    /// (uma.guide's category also files a few of the trainee's own skills, like Focus, under Debuff).
+    pub(crate) fn is_debuff(&self, id: u32) -> bool {
+        let category = self.kb.skills.get(&id).is_some_and(|k| k.category == "Debuff");
+        self.sim_data.as_ref().filter(|d| d.skills.contains_key(&id)).map_or(category, |d| d.is_debuff(id))
+    }
+
     /// Debuffs, and skills that hinge on other umas' positions: one simulated uma can't value them.
     pub(crate) fn skill_unsimulated(&self, id: u32) -> Option<&'static str> {
         let k = self.kb.skills.get(&id)?;
-        // The simulator's own data says whether a skill hits rivals (uma.guide's category also
-        // files a few of the trainee's own skills, like Focus, under Debuff).
-        let debuff = self.sim_data.as_ref().filter(|d| d.skills.contains_key(&id)).map_or(k.category == "Debuff", |d| d.is_debuff(id));
-        if debuff {
+        if self.is_debuff(id) {
             return Some("A debuff: it slows rivals, which one simulated uma can't show.");
         }
         let text = format!("{} {} {}", k.conditions, k.pre, k.alt.as_ref().map_or("", |a| a.conditions.as_str()));

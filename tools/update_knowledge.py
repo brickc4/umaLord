@@ -52,6 +52,35 @@ def fetch(url: str) -> str:
         return resp.read().decode("utf-8")
 
 
+def fetch_art(umas: list, cards: list) -> None:
+    """Download the art of every uma and card that app/assets lacks (uma.guide's icons and card
+    thumbnails, the same URLs the app's own downloader uses: tab_cards.rs, Art::url)."""
+    got = failed = 0
+    for kind, items, url in (
+        ("umas", umas, lambda i: f"{SITE}/icon/uma/chr_icon_{i // 100}_{i}_01.webp"),
+        ("cards", cards, lambda i: f"{SITE}/img/card/composite/tex_support_card_{i}_thumb.webp"),
+    ):
+        folder = os.path.join(ROOT, "app", "assets", kind)
+        os.makedirs(folder, exist_ok=True)
+        for r in items:
+            path = os.path.join(folder, f"{r['id']}.webp")
+            if os.path.exists(path):
+                continue
+            try:
+                req = urllib.request.Request(url(r["id"]), headers=UA)
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = resp.read()
+                if data[:4] != b"RIFF":
+                    raise ValueError("not a webp")
+                with open(path, "wb") as f:
+                    f.write(data)
+                got += 1
+            except Exception as e:  # noqa: BLE001 - report and go on
+                failed += 1
+                print(f"art: no {kind[:-1]} {r['id']}: {e}")
+    print(f"art: {got} downloaded, {failed} failed")
+
+
 def discover_chunks() -> dict:
     """Map logical name -> chunk URL, found via the characters page and app.js."""
     html = fetch(f"{SITE}/characters/")
@@ -362,7 +391,11 @@ def build(chunks: dict, sources: dict) -> None:
     for c in chars:
         skill_ids = [int(x) for x in str(c.get("skillIds") or "").split(",") if x.strip()]
         potential = {p["skillId"]: p["needRank"] for p in c.get("potentialSkills", [])}
-        unique = next((s for s in skill_ids if s not in potential), None)
+        # The game numbers each outfit's unique 1, outfit - 1, the chara id's last three digits, 1:
+        # Grass Wonder's second outfit (101102) has 110111. uma.guide's skillIds can lead with
+        # the first outfit's unique, so take the game's id when it exists.
+        own = 100000 + (c["cardId"] % 100 - 1) * 10000 + (c["charaId"] % 1000) * 10 + 1
+        unique = own if own in names else next((s for s in skill_ids if s not in potential), None)
         events, event_skills = [], []
         for e in events_by_card.get(c["cardId"], []):
             opts = []
@@ -444,6 +477,7 @@ def build(chunks: dict, sources: dict) -> None:
                 json.dump(data, f, ensure_ascii=False, indent=1)
     write("umas.json", umas)
     write("cards.json", cards)
+    fetch_art(umas, cards)
     write("skills.json", skills)
     write("races.json", races)
     write("glossary.json", [{"term": g["term"], "aliases": g.get("aliases", []), "description": g["description"]} for g in glossary])

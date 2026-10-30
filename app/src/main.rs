@@ -12,6 +12,8 @@ mod ask_claude_code;
 mod ask_opencode;
 mod career;
 mod data;
+mod datapack;
+mod detail_modal;
 mod charts;
 mod collection_kit;
 mod course_notes;
@@ -19,11 +21,17 @@ mod digest;
 mod home;
 mod knowledge;
 mod lineage;
+mod lineage_kit;
+mod lineage_page;
+mod lineage_plans;
+mod lineage_steps;
+mod lineage_runner;
 mod live;
 mod meta;
 mod notes;
 mod onboarding;
 mod onboarding_grid;
+mod parentage;
 mod paste;
 mod plan_sim;
 mod profile;
@@ -284,7 +292,9 @@ mod tests {
     #[test]
     fn plan_markdown_round_trips() {
         let mut a = app();
-        a.planner.demo(&a.roster, &a.kb, 101601);
+        if let Some(u) = a.roster.umas.first().map(|u| u.id) {
+            a.planner.demo(&a.roster, &a.kb, if a.roster.umas.iter().any(|x| x.id == 101601) { 101601 } else { u });
+        }
         a.planner.plan.title = "Test plan".into();
         let md = a.plan_markdown(None);
         for section in ["## Goal", "## Trainee", "## Deck", "## Skills to buy", "## Simulation", "## Recommendation"] {
@@ -357,7 +367,15 @@ mod tests {
     #[ignore]
     fn frame_times() {
         let t0 = std::time::Instant::now();
-        let mut a = app();
+        // UMALORD_ROOT=<account folder> times the pages on a real account.
+        let mut a = match std::env::var("UMALORD_ROOT") {
+            Ok(r) => {
+                let mut a = App::new(Some(std::path::PathBuf::from(r)));
+                a.onboarding.open = false;
+                a
+            }
+            Err(_) => app(),
+        };
         eprintln!("App::new {:>7.1} ms", t0.elapsed().as_secs_f64() * 1e3);
         let ctx = egui::Context::default();
         theme::install(&ctx, theme::Mode::Dark);
@@ -394,6 +412,43 @@ mod tests {
             let steady = times[1..].iter().sum::<f64>() / (times.len() - 1) as f64;
             let name = sub.map(|s| format!("{s:?}")).or(career.map(|c| format!("{c:?}"))).unwrap_or(format!("{tab:?}"));
             eprintln!("{name:<10} first {:>7.1} ms · then {:>6.2} ms/frame", times[0], steady);
+        }
+        // Lineage: each view's team builds on a worker; wait for it, then time steady frames.
+        a.tab = Tab::Lineage;
+        for view in [lineage_page::LineageView::Overview, lineage_page::LineageView::Cm, lineage_page::LineageView::Tt, lineage_page::LineageView::Runner] {
+            a.lineage.view = view;
+            // Opening a view never builds: make its plan, as Create plan would.
+            if let Some(which) = a.view_which() {
+                a.plan_start(&ctx, which, Default::default());
+            }
+            let start = std::time::Instant::now();
+            let mut first = 0.0;
+            for k in 0..6000 {
+                let t = std::time::Instant::now();
+                let _ = crate::ui_util::test_frame(&ctx, input(), |ui| a.frame(ui));
+                if k == 0 {
+                    first = t.elapsed().as_secs_f64() * 1e3;
+                }
+                if !a.lineage_busy(f64::INFINITY) && a.lineage.p.job.is_none() && k > 2 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let built = start.elapsed().as_secs_f64();
+            let failed = match &a.lineage.p.ended {
+                Some(lineage_plans::Ended::Failed(_, e, _)) => Some(e.clone()),
+                _ => None,
+            };
+            if let Some(e) = failed {
+                eprintln!("  ({view:?} didn't build here: {e}; set UMALORD_ROOT to an account to time a real team)");
+            }
+            let mut times = Vec::new();
+            for _ in 0..6 {
+                let t = std::time::Instant::now();
+                let _ = crate::ui_util::test_frame(&ctx, input(), |ui| a.frame(ui));
+                times.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            eprintln!("Lineage {view:<6?} first {first:>7.1} ms · built in {built:>5.1} s · then {:>6.2} ms/frame", times.iter().sum::<f64>() / times.len() as f64);
         }
         a.planner.plan.target[0] += 10;
         let t = std::time::Instant::now();
@@ -544,6 +599,8 @@ pub(crate) enum Tab {
     Collection,
     /// Planner, race sim and results, as sub-tabs.
     Career,
+    /// The parent planner's page: CM and Team Trials teams, and one runner's plan.
+    Lineage,
     Ask,
     /// The notes and data files: not in the top bar, opened from Settings (`App::open_notes`).
     Notes,
@@ -578,6 +635,7 @@ impl Tab {
                 "Career",
                 "Plan a career, race the build against others in the simulator, and log what really happened.",
             ),
+            Tab::Lineage => ("🌱", "Lineage", "Your next career, and why: the parent careers a Champions Meeting or Team Trials team needs, and what to look for in each."),
             Tab::Ask => ("💬", "Ask", "Ask questions about your account in plain English and get answers from your own data."),
             Tab::Notes => ("📝", "Notes", "Read the notes, plans and insights saved in this folder."),
         }
@@ -621,7 +679,7 @@ pub(crate) const GLOSSARY: &[(&str, &str)] = &[
 
 /// Keyboard shortcuts, as Help lists them (`App::shortcuts` handles them).
 pub(crate) const SHORTCUTS: &[(&str, &str)] = &[
-    ("Ctrl+1 … Ctrl+4", "Switch tabs: Home, Collection, Career, Ask"),
+    ("Ctrl+1 … Ctrl+5", "Switch tabs: Home, Collection, Career, Lineage, Ask"),
     ("Ctrl+,", "Open Settings"),
     ("Ctrl+F", "Jump to the page's search box"),
     ("Ctrl+S", "Save the plan (on Career → Plan)"),
@@ -632,7 +690,7 @@ pub(crate) const SHORTCUTS: &[(&str, &str)] = &[
 ];
 
 /// The top bar's tabs, left to right. Notes isn't one: Settings → Data and updates opens it.
-const TABS: [Tab; 4] = [Tab::Home, Tab::Collection, Tab::Career, Tab::Ask];
+const TABS: [Tab; 5] = [Tab::Home, Tab::Collection, Tab::Career, Tab::Lineage, Tab::Ask];
 
 /// The Collection tab's sub-tabs.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -663,11 +721,16 @@ pub(crate) struct App {
     pub kb: Knowledge,
     pub card_art: HashSet<u32>,
     pub uma_art: HashSet<u32>,
+    /// Full-body renders downloaded so far (app/assets/umas-full).
+    pub full_art: HashSet<u32>,
     pub tab: Tab,
     pub collection_tab: CollectionTab,
     pub career_tab: CareerTab,
     pub view: View,
     pub jump: Cell<Option<Jump>>,
+    /// The detail pop-ups open, the top one shown (`detail_modal.rs`), and one asked for this frame.
+    pub details: Vec<crate::detail_modal::Open>,
+    pub detail_ask: std::cell::RefCell<Option<(crate::detail_modal::Detail, Option<String>)>>,
     /// Skills the account can get now; rebuilt after the roster changes.
     pub available_skills: std::cell::RefCell<Option<HashSet<u32>>>,
     /// The Help window is open.
@@ -709,6 +772,15 @@ pub(crate) struct App {
     pub settings: settings_page::SettingsState,
     /// The live Champions Meeting schedule (official news and Umalator), refreshed in the background.
     pub live: live::LiveState,
+    /// The Lineage page: its view and the teams the planner built.
+    pub lineage: lineage_page::LineageState,
+    /// A team plan being made on this (headless) app: its stages so far and the Cancel flag.
+    pub progress: Option<parentage::progress::Progress>,
+    /// The weekly game-data pack (`datapack.rs`): the check in flight, and what the last one said.
+    pub pack: Option<std::sync::mpsc::Receiver<Result<datapack::Outcome, String>>>,
+    pub pack_status: Option<String>,
+    /// The pack check has been considered this launch.
+    pub pack_tried: bool,
     /// Home's derived data and daily picks.
     pub home: home::HomeState,
     /// UMALORD_RAIL: start with the Collection filters folded, for screenshots.
@@ -791,6 +863,7 @@ impl App {
             sim_error,
             card_art: scan_art(root.as_deref(), "cards"),
             uma_art: scan_art(root.as_deref(), "umas"),
+            full_art: scan_art(root.as_deref(), "umas-full"),
             kb: Knowledge::load(root.as_deref()),
             ask: ask::AskState::new(root.as_deref()),
             agent: Default::default(),
@@ -805,6 +878,8 @@ impl App {
             career_tab: CareerTab::Plan,
             view: View::Grid,
             jump: Cell::new(None),
+            details: Vec::new(),
+            detail_ask: std::cell::RefCell::new(None),
             available_skills: std::cell::RefCell::new(None),
             help_open: false,
             mascot,
@@ -824,6 +899,11 @@ impl App {
             onboarding: Default::default(),
             settings: Default::default(),
             live: Default::default(),
+            lineage: Default::default(),
+            progress: None,
+            pack: None,
+            pack_status: None,
+            pack_tried: false,
             home: Default::default(),
             debug_rail: false,
             debug_extra: false,
@@ -845,6 +925,7 @@ impl App {
         app.tab = match env("UMALORD_TAB").as_deref() {
             Some("umas" | "cards" | "skills" | "collection") => Tab::Collection,
             Some("planner" | "sim" | "results" | "career") => Tab::Career,
+            Some("lineage" | "lineage-cm" | "lineage-tt" | "lineage-runner") => Tab::Lineage,
             Some("notes") => Tab::Notes,
             Some("ask") => Tab::Ask,
             _ => Tab::Home,
@@ -853,6 +934,14 @@ impl App {
             Some("cards") => CollectionTab::Cards,
             Some("skills") => CollectionTab::Skills,
             _ => CollectionTab::Umas,
+        };
+        // UMALORD_LOOK=<key> opens a borrowed card's "What to look for" (runner:0, queue:0, card:<outfit>).
+        app.lineage.look_for = env("UMALORD_LOOK");
+        app.lineage.view = match env("UMALORD_TAB").as_deref() {
+            Some("lineage-cm") => lineage_page::LineageView::Cm,
+            Some("lineage-tt") => lineage_page::LineageView::Tt,
+            Some("lineage-runner") => lineage_page::LineageView::Runner,
+            _ => lineage_page::LineageView::Overview,
         };
         app.career_tab = match env("UMALORD_TAB").as_deref() {
             Some("sim") => CareerTab::Race,
@@ -896,6 +985,21 @@ impl App {
                     app.onboarding.open = step.is_some();
                 }
                 Err(e) => eprintln!("{e}"),
+            }
+        }
+        // UMALORD_DETAIL=card:<id>|uma:<outfit>[,card:<id>…][;context]: open detail pop-ups (stacked).
+        if let Some(v) = env("UMALORD_DETAIL") {
+            let (list, context) = v.split_once(';').map_or((v.as_str(), None), |(l, c)| (l, Some(c.to_string())));
+            for item in list.split(',') {
+                let what = match item.split_once(':') {
+                    Some(("card", id)) => id.parse().ok().map(crate::detail_modal::Detail::Card),
+                    Some(("uma", id)) => id.parse().ok().map(crate::detail_modal::Detail::Uma),
+                    _ => None,
+                };
+                if let Some(w) = what {
+                    app.open_detail(w, context.clone());
+                    app.take_detail_ask(true);
+                }
             }
         }
         // UMALORD_ADD=<card id>: open the Cards tab's Add cards dialog with that card picked.
@@ -1010,6 +1114,44 @@ impl App {
         app
     }
 
+    /// Start the weekly game-data pack check (once a launch, when it's due and fetching is
+    /// allowed), or `now` from Settings; and take its result.
+    pub(crate) fn pack_check(&mut self, ctx: &egui::Context, now: bool) {
+        let live = std::env::var("UMALORD_LIVE").ok();
+        if cfg!(test) || self.pack.is_some() || live.as_deref().is_some_and(|v| v != "fetch") || std::env::var_os("UMALORD_SCREENSHOT").is_some() {
+            return;
+        }
+        let Some(root) = self.root.clone() else { return };
+        if now || (live::enabled() && datapack::due(&ui_util::today())) {
+            self.pack = Some(datapack::spawn(root, ctx.clone()));
+        }
+    }
+
+    fn pack_poll(&mut self, ctx: &egui::Context) {
+        if !self.pack_tried {
+            self.pack_tried = true;
+            self.pack_check(ctx, false);
+        }
+        let Some(rx) = &self.pack else { return };
+        let Ok(result) = rx.try_recv() else { return };
+        self.pack = None;
+        match result {
+            Ok(datapack::Outcome::UpToDate { built }) => {
+                settings::set("data_pack_checked", serde_json::json!(ui_util::today()));
+                self.pack_status = Some(format!("Up to date (pack built {}).", &built[..built.len().min(10)]));
+            }
+            Ok(datapack::Outcome::Updated { built, files }) => {
+                settings::set("data_pack_checked", serde_json::json!(ui_util::today()));
+                let art = files.iter().filter(|f| f.ends_with(".webp")).count();
+                let msg = format!("Game data updated from the weekly pack (built {}): {} data files, {art} pictures.", &built[..built.len().min(10)], files.len() - art);
+                self.reload();
+                self.toast(&msg, ui_util::ToastKind::Info);
+                self.pack_status = Some(msg);
+            }
+            Err(e) => self.pack_status = Some(format!("Couldn't check the weekly pack: {e}")),
+        }
+    }
+
     fn reload(&mut self) {
         self.kb = Knowledge::load(self.root.as_deref());
         self.live.bundled = self.kb.umalator_presets.clone();
@@ -1018,6 +1160,7 @@ impl App {
         (self.sim_data, self.sim_error) = load_sim(self.root.as_deref());
         self.card_art = scan_art(self.root.as_deref(), "cards");
         self.uma_art = scan_art(self.root.as_deref(), "umas");
+        self.full_art = scan_art(self.root.as_deref(), "umas-full");
         self.planner.refresh_files(self.root.as_deref());
         self.planner.key_memo.set(None);
         self.planner.parent_sparks.replace(None);
@@ -1028,11 +1171,16 @@ impl App {
     }
 
     pub fn art_uri(&self, sub: &str, id: u32) -> Option<String> {
-        let set = if sub == "cards" { &self.card_art } else { &self.uma_art };
+        let set = match sub {
+            "cards" => &self.card_art,
+            "umas-full" => &self.full_art,
+            _ => &self.uma_art,
+        };
         if !set.contains(&id) {
             return None;
         }
-        let path = self.root.as_ref()?.join("app").join("assets").join(sub).join(format!("{id}.webp"));
+        let ext = if sub == "umas-full" { "png" } else { "webp" };
+        let path = self.root.as_ref()?.join("app").join("assets").join(sub).join(format!("{id}.{ext}"));
         // file:///C:/… on Windows, file:///home/… elsewhere; a folder given as `.` must not
         // become file:///./….
         let path = std::path::absolute(&path).unwrap_or(path).to_string_lossy().replace('\\', "/");
@@ -1099,7 +1247,12 @@ impl App {
     }
 
     fn apply_jump(&mut self) {
-        match self.jump.take() {
+        let jump = self.jump.take();
+        // A skill or card link inside a detail pop-up leaves it for Collection.
+        if jump.is_some() {
+            self.details.clear();
+        }
+        match jump {
             Some(Jump::Uma(id)) => {
                 self.tab = Tab::Collection;
                 self.collection_tab = CollectionTab::Umas;
@@ -1234,7 +1387,7 @@ impl App {
         }
     }
 
-    /// Keyboard shortcuts: Ctrl+1…4 tabs, Ctrl+F search, Ctrl+S save the plan, F5 reload,
+    /// Keyboard shortcuts: Ctrl+1…5 tabs, Ctrl+F search, Ctrl+S save the plan, F5 reload,
     /// Esc close, ? help, + a pulled copy. Listed in Help (`SHORTCUTS`).
     fn shortcuts(&mut self, ctx: &egui::Context) {
         use egui::{Key, KeyboardShortcut, Modifiers};
@@ -1298,7 +1451,7 @@ impl App {
 
     /// Esc: close Help, an open dialog, or the selection's detail panel, in that order.
     fn close_topmost(&mut self) {
-        if self.settings.open || self.onboarding.paste.open {
+        if self.settings.open || self.onboarding.paste.open || !self.details.is_empty() {
             // Modals close themselves on Esc.
         } else if self.help_open {
             self.help_open = false;
@@ -1334,6 +1487,7 @@ impl App {
                 CareerTab::Race => 3,
                 CareerTab::Results => 4,
             },
+            Tab::Lineage => 2,
             Tab::Ask | Tab::Notes => 5,
         }
     }
@@ -1650,7 +1804,7 @@ impl App {
             }
         }
         let simulating = self.sim.job.is_some() || self.planner.skill_job.is_some() || self.planner.pick_job.is_some() || self.sim.extra.is_some() || self.debug_extra;
-        let installing = self.ask.oc.install_rx.is_some() || simulating;
+        let installing = self.ask.oc.install_rx.is_some() || simulating || self.lineage_busy(ctx.input(|i| i.time)) || (self.tab == Tab::Lineage && ctx.has_pending_images()) || (self.tab == Tab::Lineage && ctx.input(|i| i.time) < 4.0);
         // UMALORD_ASK=<question>: ask it on start, and hold the screenshot until it's answered.
         if !installing && let Some(q) = self.debug_question.take() {
             self.tab = Tab::Ask;
@@ -1710,6 +1864,10 @@ impl App {
         ui_util::set_pose(self.pose());
         self.shortcuts(&ctx);
         self.live_poll(&ctx);
+        // Art for every uma and card in the data, downloaded in the background.
+        self.sweep_art();
+        self.pump_art(&ctx);
+        self.pack_poll(&ctx);
         let p = theme::palette(self.dark);
         egui::Panel::top("top_bar")
             .frame(egui::Frame::new().fill(p.surface).inner_margin(Margin::symmetric(14, 9)))
@@ -1729,6 +1887,7 @@ impl App {
                 }
                 Tab::Collection => self.collection_tab(ui),
                 Tab::Career => self.career_page(ui),
+                Tab::Lineage => self.lineage_page(ui),
                 Tab::Notes => self.notes_tab(ui),
                 Tab::Ask => self.ask_tab(ui),
             }
@@ -1738,6 +1897,7 @@ impl App {
         }
         self.settings_window(&ctx);
         self.start_over_dialog(&ctx);
+        self.detail_modal(&ctx);
         self.apply_jump();
         // Background simulations finish even while another tab is open.
         if (self.tab, self.career_tab) != (Tab::Career, CareerTab::Race) {

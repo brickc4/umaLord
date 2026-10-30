@@ -1,0 +1,42 @@
+# Every Monday (and on demand), refresh the game data from uma.guide, test it, and publish it as
+# the "data-pack" prerelease the app downloads weekly (app/src/datapack.rs). New umas and cards,
+# with their art, reach players without a new app release; a pack that fails the tests is never
+# published.
+name: Data pack
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+      - name: Refresh the game data and art
+        run: python -I -X utf8 tools/update_knowledge.py
+      - name: Test with the new data
+        working-directory: app
+        run: cargo test --release --locked
+      - name: Build the pack
+        run: python -I -X utf8 tools/make_data_pack.py
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view data-pack >/dev/null 2>&1; then
+            gh release create data-pack --prerelease --latest=false --title "Game data pack" \
+              --notes "Refreshed weekly from uma.guide and tested. The app downloads it by itself; nothing to install."
+          fi
+          gh release upload data-pack dist/data-pack.zip dist/data-pack.json --clobber

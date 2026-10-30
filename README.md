@@ -44,8 +44,10 @@
 - 📈 **Race sim charts**: the gap of every race, where along the course the lengths are won, speed and HP of the typical race with a replay, a timeline of every skill, what each skill is worth and where the next training points matter.
 - 🃏 **Compare two cards** side by side at your levels, filter cards by a skill they teach or an effect's minimum, and see the community tier list on every skill.
 - 🧩 **Setup in minutes**: click what you own on art grids, paste a list, or load a profile file. ⚙ Settings → Save my data puts your whole account in one file.
+- 🧬 **Lineage: your next career, and why.** A Champions Meeting or Team Trials team, or one runner, each with the parent careers it needs, a setup to copy into Independent Training, and the gain over what you can field today.
+- 📦 **Weekly game data**: new umas and cards, with their art, arrive each week, built and tested by GitHub Actions.
 - 🌱 **Your finished umas as parents**: import UmaExtractor's data.json (or run `tools/read_veterans.py` on Linux) and every finished uma lands with its sparks, parents and G1 wins; affinity for any lineage comes from the game's own tables.
-- ⌨️ **Keyboard shortcuts**: Ctrl+1–4 for the tabs, Ctrl+F to search, Ctrl+S to save the plan, F5 to reload, ? for help, + for a pulled copy.
+- ⌨️ **Keyboard shortcuts**: Ctrl+1–5 for the tabs, Ctrl+F to search, Ctrl+S to save the plan, F5 to reload, ? for help, + for a pulled copy.
 - 🤖 **MCP server**: the assistant's tools work in Claude Code and Claude Desktop too ([below](#-use-it-with-claude-code)).
 
 </details>

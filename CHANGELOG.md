@@ -6,6 +6,26 @@ What changed in each release. Releases are built from the tagged source by GitHu
 
 ### Added
 
+- **Lineage, a new tab, answers "what career should I run next, and how?"** for a Champions Meeting team, a Team Trials team or one runner. Its Next career card names who to train and why, then gives:
+  - the parents, scenario, deck with a borrowed MLB friend card, and skills
+  - how to run it: Independent Training for parent careers, with a setup panel to copy into the game (training focus, up to 10 prioritized skills to tick off, and the race agenda with each race's win chance); a manual career for runners
+  - what to keep her for, as spark chips drawn like the game's, and the odds
+- **Team plans are saved, and nothing simulates until you ask.** The tab opens on an Overview of where each plan stands (Champions Meeting, Team Trials, one runner) with what you did lately and Undo. A CM or Team Trials view shows its saved plan: mark careers done as you finish them, keep or leave out runners (the edits wait for a re-plan), re-plan or reset. The app tells you when something changed under a plan, such as a newly imported uma that meets a career's must-haves or a newer meta sheet, and lets you choose what to do. One plan per Champions Meeting.
+- **A plan is laid out step by step, in plain words.** Each team plan starts with what it's for (the event, your score today and after the plan), then every career in order: who to train, her own career or a parent career, why, how many tries it usually takes and which race it helps. Show how opens a step's details. "Your team, before and after" shows, race by race, your best finished umas racing now beside the team after the plan. Game terms explain themselves when you point at them.
+- **Click a card or an uma's picture for everything about it.** Anywhere in Lineage, on Home, and on the planner's trainee (right-click a deck slot), a pop-up shows the large art, what you own of it, why it's shown there, and its effects, skills, events or aptitudes, plus an uma's finished careers and support cards. Click outside it, press Esc or ✕ to close it; a card opened from inside it has ← Back. An uma's pop-up shows her full-body art (downloaded the first time you open her, from GameTora) beside her aptitudes and stats.
+- **Re-plan asks first, and the old plan steps aside while the new one is made.** The confirmation says what Re-plan keeps (careers marked done, runners kept or left out, edits waiting) and that Reset starts over without them.
+- **A runner's career card lists her stat goals as a table:** what to aim for in each stat, the Stamina she must reach, and the order to train them. A parent career's table marks the stats her blue spark wants at 1,100.
+- **The career card gets the room on a wide window:** it grows to 40% of the width (up to 1,200 px) and splits into two columns when it can, while the plan beside it stops at a readable width. Drag the gap between them to resize; double-click it to reset.
+- **A runner's parents say which is yours and which to borrow,** and 564 Escapades explains itself where it's asked for.
+- **A runner's career card lists her races:** her objectives (the career ends if she misses one), then the G1s that fit her for fans. The card's "Start this career" button is now "Open the skill shop helper" at its end, for picking her skills with her real stats and SP.
+- **Every plan says how to raise its ceiling:** after planning, umaLord tries the umas and cards you don't have, cards you haven't limit broken, and better parents to borrow, measures each in the same simulations the plan used, and lists what would raise it most: points a round for Team Trials, lengths a race for Champions Meeting, careers or stats for one runner.
+- **Planning waits until your account is set up:** with no umas or support cards entered yet, the Lineage tab says what to add and keeps Create plan off. With no finished umas imported, it warns that plans will be for a fresh account and offers the import.
+- **You can watch a plan being made:** each stage ticks off with what it found and why (the runners chosen, who beat whom head to head, the parent routes, decks and the gain over today's team), and Cancel stops it without touching your saved plan. The log stays with the plan under "How this plan was chosen".
+- **Teams are compared with what you can field today:** your finished umas as they are, raced in the simulator. Champions Meeting shows each runner's head-to-head share against today's best. Team Trials puts today and the plan side by side for each race, with the gain.
+- **One runner's parent plan is tracked step by step.** If a step won't come, the Stuck panel offers to settle with the closest uma, try another route, or keep going. Each choice is previewed first and can be undone.
+- **The layout suits any window:** two panes at 1200 px and wider (the card beside the overview, each scrolling on its own), one column below. Small text keeps 4.5:1 contrast in both themes.
+- **Game data refreshes every week:** new umas and cards, with their art, arrive without a new release. The pack is built and tested by GitHub Actions; the app downloads only the files that changed, and checks each one.
+- **Every uma and card has its picture:** the 90 cards that were missing art now ship with it, and anything new downloads in the background.
 - The Ask tab's Claude backend can run on your Claude account: with Claude Code installed, questions go through it, signed in with its own login, a setup token from `claude setup-token`, or an API key. It runs isolated from your Claude Code settings, keeps one process per conversation so follow-ups start at once, and streams the answer.
 - Builds and runs on Linux (Wayland) and macOS from source, tested in CI on all three. Settings live in the platform's own folder, times show in your local time zone, and the Ask tab uses `opencode` from your PATH.
 - The app bundles small symbol fonts, so every icon draws whatever fonts the system has.
@@ -14,8 +34,15 @@ What changed in each release. Releases are built from the tagged source by GitHu
 - Import your finished umas from UmaExtractor's data.json (or `tools/read_veterans.py` on Linux): each lands in your parents list with its sparks, parents and G1 wins, the assistant can rank them as parents for any trainee, and umas you've trained but hadn't listed are added.
 - Affinity between a trainee and her parents and grandparents, from the game's own relation tables plus +3 per shared G1. The assistant can work out each slot's affinity and rank the best parents for a trainee, and the app refreshes the tables from uma.guide every week.
 
+### Changed
+
+- Ctrl+4 opens the new Lineage tab; Ask moved to Ctrl+5.
+
 ### Fixed
 
+- **Parent careers recommended skills the runner couldn't use.** A parent's skills become her runner's white sparks, and 56% of the picks were tied to another style, distance or racecourse. Now every pick fits the runner, and tests check every brief.
+- **Parent plans could cost more careers than they needed.** A route where the second career only has to finish was considered only when nothing else fitted, and re-planning could swap your next step for a costlier one. Predictions now match play-throughs within a few percent.
+- Twelve second and third outfits (Grass Wonder [Saintly Jade Cleric], Oguri Cap [Ashen Miracle], Maruzensky [Hot☆Summer Night] and others) showed their first outfit's unique skill; each now has its own, matching the game's spark table.
 - On Linux, Downloads and Pictures follow the desktop's own folders (`~/.config/user-dirs.dirs`).
 - The planner's Upcoming CM legend puts ✔ announced and ? estimated on their own lines instead of wrapping mid-phrase.
 

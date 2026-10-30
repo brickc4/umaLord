@@ -625,6 +625,28 @@ pub fn is_dark(ctx: &egui::Context) -> bool {
 mod tests {
     use super::*;
 
+    /// Headings and bold words need a heavier face than the text's (fontconfig answers a weight
+    /// it lacks with the regular face, which `install_fonts` then reuses).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn linux_semibold_is_a_heavier_face() {
+        let (Some(regular), Some(semibold)) = (font_file(&REGULAR), font_file(&SEMIBOLD_FONT)) else { return };
+        eprintln!("regular {regular:?}\nsemibold {semibold:?}");
+        assert_ne!(regular, semibold);
+    }
+
+    /// Semibold text is set wider than regular text: the family really uses the heavier face.
+    #[test]
+    fn semibold_text_is_heavier() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let _ = crate::ui_util::test_frame(&ctx, Default::default(), |_| {});
+        let width = |family: FontFamily| ctx.fonts_mut(|f| f.layout_no_wrap("The steps, in order".into(), egui::FontId::new(17.0, family), Color32::WHITE).size().x);
+        let (r, b) = (width(FontFamily::Proportional), width(FontFamily::Name(SEMIBOLD.into())));
+        eprintln!("regular {r} semibold {b}");
+        assert!(b > r, "semibold {b} is no wider than regular {r}");
+    }
+
     /// The macOS font paths are written from Apple's layout, not looked up, so CI checks them.
     #[cfg(target_os = "macos")]
     #[test]

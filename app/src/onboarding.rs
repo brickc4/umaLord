@@ -652,7 +652,7 @@ impl App {
             painter.rect_filled(r.expand(2.0), CornerRadius::same(10), p.surface);
             let sub = if collage == Collage::Umas { "umas" } else { "cards" };
             if let Some(uri) = self.art_uri(sub, *id) {
-                egui::Image::new(uri).corner_radius(CornerRadius::same(8)).paint_at(ui, r);
+                crate::ui_util::paint_cover(ui, egui::Image::new(uri).corner_radius(CornerRadius::same(8)), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)));
             }
         }
         let text_x = rect.left() + 22.0;

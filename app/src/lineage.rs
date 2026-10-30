@@ -121,9 +121,9 @@ pub fn report(kb: &Knowledge, trainee: u32, slots: &[Slot], target: &[&str]) -> 
     }
     let greens: Vec<String> = slots.iter().filter(|s| s.legacy).flat_map(|s| s.sparks.iter().filter(|x| x.kind == "green").map(move |x| format!("{} (from {})", x.name, s.label))).collect();
     if !greens.is_empty() {
-        out += &format!("- Inherited uniques: {}.\n", greens.join(", "));
+        out += &format!("- Inherited uniques (given at the start, nothing rolled): {}.\n", greens.join(", "));
     }
-    out += "\nAt the two April inspirations (each spark rolls base × (1 + slot affinity/100); shown as the chance it fires at least once over both):\n";
+    out += "\nAt the two April inspirations (each spark rolls base × (1 + slot affinity/100); shown as the chance it fires at least once over both; a legacy's green fired here only adds hint levels to the unique she already has, and a grandparent's gives its hint):\n";
     for s in slots {
         let pink: Vec<String> = s.sparks.iter().filter(|x| x.kind == "pink").map(|x| format!("{} {}★ {}", x.name, x.stars, pct(over_both("pink", x.stars, s.affinity)))).collect();
         let green: Vec<String> = s.sparks.iter().filter(|x| x.kind == "green").map(|x| format!("{} {}★ {}", x.name, x.stars, pct(over_both("green", x.stars, s.affinity)))).collect();

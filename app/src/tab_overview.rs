@@ -12,7 +12,7 @@ use crate::knowledge::{Distance, EventPreset, Style, grade_rank};
 use crate::tab_planner::Plan;
 use crate::theme::{pal, size};
 use crate::ui_util::{badge, semibold, today, type_color, type_icon};
-use crate::{App, CareerTab, CollectionTab, Jump, Tab};
+use crate::{App, CareerTab, CollectionTab, Tab};
 
 /// Segments of a type's bar: SSR MLB, other SSR, SR MLB, other SR.
 const SEGMENTS: [(&str, f32); 4] = [("SSR, maxed", 1.0), ("SSR", 0.6), ("SR, maxed", 0.38), ("SR", 0.2)];
@@ -468,7 +468,7 @@ impl App {
                     ui.painter().rect_filled(rect, CornerRadius::same(8), p.hover);
                 }
                 if let Some(uri) = self.art_uri("umas", *id) {
-                    egui::Image::new(uri).corner_radius(CornerRadius::same(8)).paint_at(ui, img);
+                    crate::ui_util::paint_cover(ui, egui::Image::new(uri).corner_radius(CornerRadius::same(8)), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)));
                 }
                 let star = if meta_ids.contains(id) { "★ " } else { "" };
                 ui.painter().text(pos2(rect.center().x, img.bottom() + 11.0), Align2::CENTER_CENTER, format!("{star}{}", crate::ui_util::truncate(&info.name, 12)), FontId::proportional(12.0), p.text);
@@ -483,7 +483,10 @@ impl App {
                     if weak { p.warn } else { p.weak },
                 );
                 let warn = if weak { "\n⚠ Below B here: she'd be slow without pink sparks from parents." } else { "" };
-                if resp.on_hover_text(format!("{} [{}]{warn}\nClick to plan the CM with her", info.name, info.outfit)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                if resp.secondary_clicked() {
+                    self.open_detail(crate::detail_modal::Detail::Uma(*id), None);
+                }
+                if resp.on_hover_text(format!("{} [{}]{warn}\nClick to plan the CM with her; right-click for her details", info.name, info.outfit)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     picked = Some(CmAction::Trainee(*id));
                 }
             }
@@ -685,11 +688,11 @@ impl App {
             for u in below.iter().take(5) {
                 let (rect, resp) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::click());
                 if let Some(uri) = self.art_uri("umas", u.id) {
-                    egui::Image::new(uri).corner_radius(CornerRadius::same(8)).paint_at(ui, rect);
+                    crate::ui_util::paint_cover(ui, egui::Image::new(uri).corner_radius(CornerRadius::same(8)), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)));
                 }
                 crate::ui_util::potential_badge(ui.painter(), rect.right_bottom(), u.potential);
-                if resp.on_hover_text(format!("{} {}★ P{}", u.display_name(), u.stars, u.potential)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                    self.jump.set(Some(Jump::Uma(u.id)));
+                if resp.on_hover_text(format!("{} {}★ P{} · click for details", u.display_name(), u.stars, u.potential)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.open_detail(crate::detail_modal::Detail::Uma(u.id), None);
                 }
             }
             if below.len() > 5 {
@@ -778,7 +781,10 @@ impl App {
         let mut plan = false;
         ui.horizontal(|ui| {
             if let Some(uri) = self.art_uri("umas", u.id) {
-                ui.add(egui::Image::new(uri).fit_to_exact_size(vec2(84.0, 84.0)).corner_radius(CornerRadius::same(12)));
+                let art = egui::Image::new(uri).fit_to_exact_size(vec2(84.0, 84.0)).corner_radius(CornerRadius::same(12)).sense(Sense::click());
+                if ui.add(art).on_hover_text("Click for her details").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.open_detail(crate::detail_modal::Detail::Uma(u.id), None);
+                }
             }
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
@@ -855,12 +861,12 @@ impl App {
                     ui.painter().add(egui::Shadow { offset: [0, 3], blur: 10, spread: 0, color: Color32::from_black_alpha(60) }.as_shape(img, CornerRadius::same(6)));
                 }
                 match self.art_uri("cards", *id) {
-                    Some(uri) => egui::Image::new(uri).corner_radius(CornerRadius::same(6)).paint_at(ui, img),
+                    Some(uri) => crate::ui_util::paint_cover(ui, egui::Image::new(uri).corner_radius(CornerRadius::same(6)), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))),
                     None => crate::ui_util::placeholder(ui.painter(), img, crate::ui_util::type_color_str(&info.kind), &info.uma),
                 }
                 ui.painter().text(pos2(img.center().x, img.bottom() + 9.0), Align2::CENTER_CENTER, caption, FontId::proportional(10.5), p.weak);
-                if resp.on_hover_text(format!("{} {} [{}] ({})", info.rarity, info.uma, info.title, info.kind)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                    self.jump.set(Some(Jump::Card(*id)));
+                if resp.on_hover_text(format!("{} {} [{}] ({}) · click for details", info.rarity, info.uma, info.title, info.kind)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.open_detail(crate::detail_modal::Detail::Card(*id), Some(caption.to_string()).filter(|c| !c.is_empty()));
                 }
             }
         });

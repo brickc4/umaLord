@@ -45,6 +45,28 @@ pub struct Veteran {
     pub factor_id_array: Vec<u32>,
     pub win_saddle_id_array: Vec<u32>,
     pub succession_chara_array: Vec<Ancestor>,
+    /// Skills learned, the unique with its level.
+    pub skill_array: Vec<SkillRef>,
+    /// Running style it raced with: 1 Front, 2 Pace, 3 Late, 4 End.
+    pub running_style: u8,
+    /// Aptitudes after inheritance, 1 = G … 8 = S.
+    pub proper_ground_turf: u8,
+    pub proper_ground_dirt: u8,
+    pub proper_distance_short: u8,
+    pub proper_distance_mile: u8,
+    pub proper_distance_middle: u8,
+    pub proper_distance_long: u8,
+    pub proper_running_style_nige: u8,
+    pub proper_running_style_senko: u8,
+    pub proper_running_style_sashi: u8,
+    pub proper_running_style_oikomi: u8,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct SkillRef {
+    pub skill_id: u32,
+    pub level: u32,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -209,8 +231,21 @@ fn uma_name(kb: &Knowledge, card: u32) -> String {
 }
 
 fn scenario_name(kb: &Knowledge, id: u32) -> String {
-    // The game numbers scenarios in release order, as scenarios.json lists them.
-    kb.scenarios.as_ref().and_then(|s| s.scenarios.get(id.wrapping_sub(1) as usize)).map_or_else(|| format!("scenario {id}"), |s| s.name.clone())
+    scenario_of(id).and_then(|n| kb.scenarios.as_ref()?.scenarios.iter().find(|s| s.name == n).map(|s| s.name.clone())).unwrap_or_else(|| format!("scenario {id}"))
+}
+
+/// The game's scenario id, as a scenarios.json name. Not Global's release order: the ids follow
+/// JP's, so 3 is Grand Concert (JP Grand Live) and 4 Trackblazer (JP Climax). Checked
+/// 2026-10-29 against the scenario sparks real careers carry: every id-3 career holds "Our Grand
+/// Concert", every id-4 one "TS Climax Scenario".
+pub(crate) fn scenario_of(id: u32) -> Option<&'static str> {
+    match id {
+        1 => Some("URA Finale"),
+        2 => Some("Unity Cup"),
+        3 => Some("Grand Concert"),
+        4 => Some("Trackblazer"),
+        _ => None,
+    }
 }
 
 /// One ancestor in a cell: "Gold Ship [Red Strife]: Stamina 2★ · Long 1★ · Unique 1★, 4 white".
@@ -403,6 +438,17 @@ impl App {
         if vets.len() < before {
             msg += &format!(" That's fewer than before: the last import is kept in {}/backups/.", crate::profile::DIR);
         }
+        // The parent plan: confirm steps checked off by hand, then say if a new uma meets the step.
+        if let Some(mut plan) = crate::parentage::track::load(&root).filter(|p| !p.paused) {
+            let notes = plan.confirm(&self.kb, &vets, &crate::ui_util::local_today());
+            if !notes.is_empty() {
+                crate::parentage::track::save(&root, &plan)?;
+                msg += &format!(" {}", notes.join(" "));
+            }
+            if let Some(note) = crate::parentage::text::import_note(&self.kb, &plan, &vets) {
+                msg += &format!(" {note}");
+            }
+        }
         Ok(msg)
     }
 
@@ -459,7 +505,7 @@ mod tests {
         let r = row(&kb, &v);
         assert!(r.starts_with("| Oguri Cap [Starlight Beat] #7 | Speed 3★ | Turf 2★ |"), "{r}");
         assert!(r.contains("Right-Handed ○ 1★") && r.contains("Gold Ship [") && r.contains("its parents: Mejiro McQueen ["), "{r}");
-        assert!(r.contains("A+ rank (12500) · Trackblazer · 3 G1 wins"), "{r}");
+        assert!(r.contains("A+ rank (12500) · Grand Concert · 3 G1 wins"), "{r}");
         let l = v.legacy(&kb);
         assert_eq!(l.parents[0].as_ref().map(|a| a.wins.len()), Some(1));
         assert!(l.parents[1].is_none(), "position 20 is empty");

@@ -513,7 +513,7 @@ impl App {
         if ui.is_rect_visible(rect) {
             let p = ui.painter();
             match self.art_uri("umas", uma.id) {
-                Some(uri) => egui::Image::new(uri).corner_radius(CornerRadius::same(10)).paint_at(ui, img),
+                Some(uri) => crate::ui_util::paint_cover(ui, egui::Image::new(uri).corner_radius(CornerRadius::same(10)), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))),
                 None => placeholder(p, img, Color32::from_gray(70), &uma.name),
             }
             potential_badge(p, img.right_bottom() - vec2(4.0, 4.0), uma.potential);
@@ -774,51 +774,48 @@ impl App {
         });
         ui.add_space(8.0);
 
-        let Some(info) = info else {
+        if info.is_none() {
             ui.label(RichText::new("No knowledge data for this outfit yet. Rebuild knowledge/data.").color(pal(ui).warn));
             return;
-        };
+        }
+        self.uma_sections(ui, uma.id, Some(uma.potential), true, true);
 
-        card_explained(ui, "Aptitudes", "S and A are ideal. Below A she runs slower there, unless parents' pink sparks raise the grade.", |ui| {
-            let a = &info.aptitude;
-            let rows: [(&str, Vec<(&str, &str)>); 3] = [
-                ("Track", vec![("Turf", &a.turf), ("Dirt", &a.dirt)]),
-                ("Distance", vec![("Sprint", &a.sprint), ("Mile", &a.mile), ("Medium", &a.medium), ("Long", &a.long)]),
-                ("Style", vec![("Front", &a.front), ("Pace", &a.pace), ("Late", &a.late), ("End", &a.end)]),
-            ];
-            for (title, cells) in rows {
-                ui.horizontal(|ui| {
-                    ui.add_sized([70.0, 40.0], egui::Label::new(RichText::new(title).color(p.weak)));
-                    for (label, g) in cells {
-                        grade_badge(ui, label, g);
-                    }
-                });
-            }
-        });
-
-        card_explained(ui, "Stats", "Base: her starting stats. Growth: a bonus to what training adds to that stat.", |ui| {
-            egui::Grid::new("uma_stats").num_columns(6).spacing([16.0, 6.0]).show(ui, |ui| {
-                ui.label("");
-                for h in ["Speed", "Stamina", "Power", "Guts", "Wit"] {
-                    ui.label(RichText::new(h).color(p.weak));
-                }
-                ui.end_row();
-                ui.label(RichText::new("Base").color(p.weak));
-                for v in info.base {
-                    ui.label(semibold(v.to_string(), 15.0));
-                }
-                ui.end_row();
-                ui.label(RichText::new("Growth").color(p.weak));
-                for v in info.growth {
-                    if v == 0 {
-                        ui.label(RichText::new("·").color(p.weak));
-                    } else {
-                        ui.label(semibold(format!("+{v}%"), 14.0).color(p.gold));
+        let outfits: Vec<&Uma> = self.roster.umas.iter().filter(|u| u.name == uma.name && u.id != uma.id).collect();
+        let own_cards: Vec<_> = self.roster.cards.iter().filter(|c| c.uma == uma.name).collect();
+        if !outfits.is_empty() || !own_cards.is_empty() {
+            card_titled(ui, "Related", |ui| {
+                for u in outfits {
+                    if ui.link(format!("🐴 [{}] {}★ P{}", u.outfit, u.stars, u.potential)).clicked() {
+                        self.jump.set(Some(Jump::Uma(u.id)));
                     }
                 }
-                ui.end_row();
+                if !own_cards.is_empty() {
+                    ui.label(RichText::new(format!("Your {} cards can't go in her own deck.", uma.name)).size(12.0).color(p.weak));
+                    for c in own_cards {
+                        if ui.link(format!("🃏 {} {} [{}] LB{}", c.rarity.label(), c.card_type.label(), c.title, c.lb)).clicked() {
+                            self.jump.set(Some(Jump::Card(c.id)));
+                        }
+                    }
+                }
             });
-        });
+        }
+        ui.add_space(10.0);
+    }
+
+    /// Everything known about an outfit, below its header: aptitudes and stats (each unless the
+    /// header already shows it), skills (locked above `potential` when she's owned),
+    /// evolutions, objectives and events. Collection's detail panel and the detail pop-up both
+    /// draw it.
+    pub(crate) fn uma_sections(&mut self, ui: &mut egui::Ui, id: u32, potential: Option<u8>, aptitudes: bool, stats: bool) {
+        let p = pal(ui);
+        let Some(info) = self.kb.umas.get(&id).cloned() else { return };
+
+        if aptitudes {
+            card_explained(ui, "Aptitudes", "S and A are ideal. Below A she runs slower there, unless parents' pink sparks raise the grade.", |ui| aptitude_rows(ui, &info));
+        }
+        if stats {
+            card_explained(ui, "Stats", "Base: her starting stats. Growth: a bonus to what training adds to that stat.", |ui| stats_grid(ui, &info));
+        }
 
         card_explained(ui, "Skills", "Click a skill to see what it does. Potential skills above her current potential are locked.", |ui| {
             if let Some(u) = info.unique_skill {
@@ -832,7 +829,7 @@ impl App {
             let mut levels: Vec<u8> = info.skills.iter().map(|s| s.potential).collect();
             levels.dedup();
             for lvl in levels {
-                let locked = lvl > uma.potential;
+                let locked = potential.is_some_and(|p| lvl > p);
                 let title = if lvl <= 1 { "INNATE".to_string() } else { format!("POTENTIAL {lvl}{}", if locked { "  🔒 locked" } else { "" }) };
                 ui.label(RichText::new(title).size(11.0).color(if locked { pal(ui).warn } else { p.weak }));
                 ui.horizontal_wrapped(|ui| {
@@ -885,7 +882,7 @@ impl App {
         if !info.events.is_empty() {
             card_explained(ui, &format!("Events ({})", info.events.len()), "Story events in her career and what each choice gives. Click one to open it.", |ui| {
                 for (i, e) in info.events.iter().enumerate() {
-                    egui::CollapsingHeader::new(RichText::new(&e.name)).id_salt(("uma_ev", uma.id, i)).show(ui, |ui| {
+                    egui::CollapsingHeader::new(RichText::new(&e.name)).id_salt(("uma_ev", id, i)).show(ui, |ui| {
                         ui.label(RichText::new(&e.kind).size(11.5).color(p.weak));
                         for (n, o) in e.options.iter().enumerate() {
                             let label = if e.options.len() > 1 { format!("Option {}", n + 1) } else { "Outcome".to_string() };
@@ -899,27 +896,51 @@ impl App {
             });
         }
 
-        let outfits: Vec<&Uma> = self.roster.umas.iter().filter(|u| u.name == uma.name && u.id != uma.id).collect();
-        let own_cards: Vec<_> = self.roster.cards.iter().filter(|c| c.uma == uma.name).collect();
-        if !outfits.is_empty() || !own_cards.is_empty() {
-            card_titled(ui, "Related", |ui| {
-                for u in outfits {
-                    if ui.link(format!("🐴 [{}] {}★ P{}", u.outfit, u.stars, u.potential)).clicked() {
-                        self.jump.set(Some(Jump::Uma(u.id)));
-                    }
-                }
-                if !own_cards.is_empty() {
-                    ui.label(RichText::new(format!("Your {} cards can't go in her own deck.", uma.name)).size(12.0).color(p.weak));
-                    for c in own_cards {
-                        if ui.link(format!("🃏 {} {} [{}] LB{}", c.rarity.label(), c.card_type.label(), c.title, c.lb)).clicked() {
-                            self.jump.set(Some(Jump::Card(c.id)));
-                        }
-                    }
-                }
-            });
-        }
-        ui.add_space(10.0);
     }
+}
+
+/// Her ten aptitude grades in three rows: track, distance, style.
+pub(crate) fn aptitude_rows(ui: &mut egui::Ui, info: &crate::knowledge::UmaInfo) {
+    let p = pal(ui);
+    let a = &info.aptitude;
+    let rows: [(&str, Vec<(&str, &str)>); 3] = [
+        ("Track", vec![("Turf", &a.turf), ("Dirt", &a.dirt)]),
+        ("Distance", vec![("Sprint", &a.sprint), ("Mile", &a.mile), ("Medium", &a.medium), ("Long", &a.long)]),
+        ("Style", vec![("Front", &a.front), ("Pace", &a.pace), ("Late", &a.late), ("End", &a.end)]),
+    ];
+    for (title, cells) in rows {
+        ui.horizontal(|ui| {
+            ui.add_sized([70.0, 40.0], egui::Label::new(RichText::new(title).color(p.weak)));
+            for (label, g) in cells {
+                grade_badge(ui, label, g);
+            }
+        });
+    }
+}
+
+/// Her base stats and growth bonuses, a row each, in the same 52 px columns as the aptitude
+/// grades above them.
+pub(crate) fn stats_grid(ui: &mut egui::Ui, info: &crate::knowledge::UmaInfo) {
+    let p = pal(ui);
+    let cell = |ui: &mut egui::Ui, text: RichText| {
+        ui.allocate_ui_with_layout(vec2(52.0, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.set_width(52.0);
+            ui.label(text);
+        });
+    };
+    let row = |ui: &mut egui::Ui, title: &str, hover: &str, cells: Vec<RichText>| {
+        ui.horizontal(|ui| {
+            ui.add_sized([70.0, 22.0], egui::Label::new(RichText::new(title).color(p.weak))).on_hover_text(hover);
+            for c in cells {
+                cell(ui, c);
+            }
+        });
+    };
+    let heads = ["Speed", "Stamina", "Power", "Guts", "Wit"].map(|h| RichText::new(h).size(11.5).color(p.weak)).to_vec();
+    row(ui, "", "", heads);
+    row(ui, "Base", "Her stats at the start of a career.", info.base.iter().map(|v| semibold(v.to_string(), 15.0)).collect());
+    let growth = info.growth.iter().map(|v| if *v == 0 { RichText::new("–").color(p.weak) } else { semibold(format!("+{v}%"), 14.0).color(p.gold) }).collect();
+    row(ui, "Growth", "A bonus to what training adds to that stat.", growth);
 }
 
 fn title_case(s: &str) -> String {

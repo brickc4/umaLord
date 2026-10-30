@@ -473,7 +473,7 @@ impl App {
             }
             let alpha = (90.0 + 165.0 * t) as u8;
             match self.art_uri("umas", id) {
-                Some(uri) => egui::Image::new(uri).corner_radius(CornerRadius::same(10)).tint(Color32::from_white_alpha(alpha)).paint_at(ui, img),
+                Some(uri) => crate::ui_util::paint_cover(ui, egui::Image::new(uri).corner_radius(CornerRadius::same(10)).tint(Color32::from_white_alpha(alpha)), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))),
                 None => placeholder(ui.painter(), img, Color32::from_gray(70), &info.name),
             }
             let painter = ui.painter();
@@ -541,7 +541,7 @@ impl App {
             }
             let alpha = (90.0 + 165.0 * t) as u8;
             match self.art_uri("cards", id) {
-                Some(uri) => egui::Image::new(uri).corner_radius(CornerRadius::same(6)).tint(Color32::from_white_alpha(alpha)).paint_at(ui, img),
+                Some(uri) => crate::ui_util::paint_cover(ui, egui::Image::new(uri).corner_radius(CornerRadius::same(6)).tint(Color32::from_white_alpha(alpha)), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))),
                 None => placeholder(ui.painter(), img, type_color_str(&info.kind), &info.uma),
             }
             let painter = ui.painter();

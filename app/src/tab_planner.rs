@@ -153,7 +153,7 @@ impl Plan {
         self.cm_date = Some(preset.date.clone());
         self.cm_name = Some(preset.name.clone());
         self.umalator_course = Some(preset.course);
-        if let Some(s) = kb.cm_scenario(preset) {
+        if let Some(s) = kb.cm_global_scenario(preset) {
             self.scenario = s.to_string();
         }
         let Some(course) = kb.umalator_courses.iter().find(|c| c.id == preset.course) else {
@@ -476,7 +476,7 @@ pub(crate) fn day_number(date: &str) -> i64 {
     era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
 }
 
-fn days_apart(a: &str, b: &str) -> i64 {
+pub(crate) fn days_apart(a: &str, b: &str) -> i64 {
     (day_number(a) - day_number(b)).abs()
 }
 
@@ -1233,7 +1233,10 @@ impl App {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if let Some(uri) = self.art_uri("umas", id) {
-                ui.add(egui::Image::new(uri).fit_to_exact_size(vec2(84.0, 84.0)).corner_radius(CornerRadius::same(12)));
+                let art = egui::Image::new(uri).fit_to_exact_size(vec2(84.0, 84.0)).corner_radius(CornerRadius::same(12)).sense(egui::Sense::click());
+                if ui.add(art).on_hover_text("Click for her details").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.open_detail(crate::detail_modal::Detail::Uma(id), None);
+                }
             }
             ui.add_space(6.0);
             ui.vertical(|ui| {
@@ -1297,7 +1300,7 @@ impl App {
                     if !enabled {
                         image = image.tint(Color32::from_white_alpha(70));
                     }
-                    image.paint_at(ui, img);
+                    crate::ui_util::paint_cover(ui, image, img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)));
                 }
                 None => {
                     ui.painter().rect_filled(img, CornerRadius::same(8), p.raised);
@@ -1317,6 +1320,10 @@ impl App {
                 if enabled { p.text } else { p.weak },
             );
             tile_ring(ui, img, false, enabled && resp.hovered(), 10);
+        }
+        // A click picks; right-click opens the card's details.
+        if let Some(id) = id.filter(|_| resp.secondary_clicked()) {
+            self.open_detail(crate::detail_modal::Detail::Card(id), None);
         }
         resp
     }

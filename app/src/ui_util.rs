@@ -365,7 +365,7 @@ pub fn pill(ui: &mut egui::Ui, text: RichText, fill: Color32, stroke: Stroke) ->
     pill_padded(ui, text, fill, stroke, vec2(16.0, 6.0))
 }
 
-fn pill_padded(ui: &mut egui::Ui, text: RichText, fill: Color32, stroke: Stroke, pad: Vec2) -> Response {
+pub fn pill_padded(ui: &mut egui::Ui, text: RichText, fill: Color32, stroke: Stroke, pad: Vec2) -> Response {
     let galley = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body);
     let size = galley.size() + pad;
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
@@ -556,6 +556,37 @@ pub fn skeleton_lines(ui: &mut egui::Ui, lines: usize) {
     }
 }
 
+
+
+/// Paints an image into `rect` without ever stretching it: when the rect's shape differs from
+/// the image's (or from `uv`, the part of it to show), the image is cropped evenly at the edges
+/// to fit, like CSS `object-fit: cover`. While the texture loads, it paints as `paint_at` would.
+pub fn paint_cover(ui: &egui::Ui, image: egui::Image<'_>, rect: Rect, uv: Rect) {
+    let size = image.load_for_size(ui.ctx(), rect.size()).ok().and_then(|t| t.size());
+    let uv = match size {
+        Some(px) if rect.width() > 0.0 && rect.height() > 0.0 => cover_uv(px, uv, rect.size()),
+        _ => uv,
+    };
+    image.uv(uv).paint_at(ui, rect);
+}
+
+/// The part of `uv` (in an image of `px` pixels) with `target`'s aspect ratio, centred.
+pub fn cover_uv(px: egui::Vec2, uv: Rect, target: egui::Vec2) -> Rect {
+    let src = egui::vec2(px.x * uv.width(), px.y * uv.height());
+    let (want, have) = (target.x / target.y, src.x / src.y);
+    if (want - have).abs() < 1e-4 {
+        return uv;
+    }
+    let c = uv.center();
+    if have > want {
+        // The image is wider: trim its sides.
+        let w = uv.width() * want / have;
+        Rect::from_center_size(c, egui::vec2(w, uv.height()))
+    } else {
+        let h = uv.height() * have / want;
+        Rect::from_center_size(c, egui::vec2(uv.width(), h))
+    }
+}
 pub fn placeholder(p: &Painter, rect: Rect, color: Color32, text: &str) {
     p.rect_filled(rect, CornerRadius::same(6), color.gamma_multiply(0.35));
     p.text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(12.0), Color32::WHITE);
@@ -1503,6 +1534,25 @@ pub fn today() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// Art is cropped to its box's shape, never stretched: a card (260×346) in a 3:4 box, a
+    /// square icon in a wide box, and the full-body render's middle half.
+    #[test]
+    fn cover_never_distorts() {
+        let full = eframe::egui::Rect::from_min_max(eframe::egui::pos2(0.0, 0.0), eframe::egui::pos2(1.0, 1.0));
+        for (px, uv, target) in [
+            (eframe::egui::vec2(260.0, 346.0), full, eframe::egui::vec2(72.0, 96.0)),
+            (eframe::egui::vec2(256.0, 256.0), full, eframe::egui::vec2(80.0, 40.0)),
+            (eframe::egui::vec2(768.0, 1024.0), eframe::egui::Rect::from_min_max(eframe::egui::pos2(0.24, 0.05), eframe::egui::pos2(0.76, 0.97)), eframe::egui::vec2(127.0, 300.0)),
+            (eframe::egui::vec2(260.0, 346.0), full, eframe::egui::vec2(260.0, 346.0)),
+        ] {
+            let c = crate::ui_util::cover_uv(px, uv, target);
+            let shown = eframe::egui::vec2(px.x * c.width(), px.y * c.height());
+            assert!((shown.x / shown.y - target.x / target.y).abs() < 1e-3, "{px:?} in {target:?} shows {shown:?}");
+            assert!(c.min.x >= uv.min.x - 1e-6 && c.max.x <= uv.max.x + 1e-6 && c.min.y >= uv.min.y - 1e-6 && c.max.y <= uv.max.y + 1e-6);
+        }
+    }
+
     use eframe::egui;
 
     /// Open a search dropdown, type a filter, delete it again: every row comes back.

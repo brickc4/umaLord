@@ -129,14 +129,57 @@ pub(crate) struct AddCard {
     pub owned_only: bool,
 }
 
-/// Card art to download from uma.guide, four at a time.
+/// Which art: a support card's, an uma outfit's icon, or her full-body render (the detail
+/// pop-up's, fetched when one opens).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum Art {
+    Card,
+    Uma,
+    Full,
+}
+
+impl Art {
+    /// Its folder under app/assets, its file type, and where it's served.
+    pub(crate) fn dir(self) -> &'static str {
+        match self {
+            Art::Card => "cards",
+            Art::Uma => "umas",
+            Art::Full => "umas-full",
+        }
+    }
+
+    pub(crate) fn ext(self) -> (&'static str, image::ImageFormat) {
+        match self {
+            Art::Full => ("png", image::ImageFormat::Png),
+            _ => ("webp", image::ImageFormat::WebP),
+        }
+    }
+
+    pub(crate) fn url(self, id: u32) -> String {
+        match self {
+            Art::Card => format!("https://uma.guide/img/card/composite/tex_support_card_{id}_thumb.webp"),
+            // The character id is the outfit id's first four digits: 100101 is chr_icon_1001_100101.
+            Art::Uma => format!("https://uma.guide/icon/uma/chr_icon_{}_{id}_01.webp", id / 100),
+            // GameTora's trainee render: the outfit's 3D model standing, 768×1024 on transparency
+            // (all 109 Global outfits there, checked 2026-10-29).
+            Art::Full => format!("https://media.gametora.com/umamusume/characters/render/trainee/idle/{id}.png"),
+        }
+    }
+}
+
+/// Art to download from uma.guide, four at a time: cards and uma icons the app has no picture
+/// for (on demand, and once per launch for everything in the knowledge data).
 #[derive(Default)]
 pub(crate) struct ArtQueue {
-    pending: VecDeque<u32>,
-    seen: HashSet<u32>,
-    running: Vec<mpsc::Receiver<(u32, bool)>>,
+    pending: VecDeque<(Art, u32)>,
+    seen: HashSet<(Art, u32)>,
+    running: Vec<mpsc::Receiver<(Art, u32, bool)>>,
+    /// Downloads that failed this session, so a picture stops showing as loading.
+    failed: HashSet<(Art, u32)>,
     /// The card just saved: say so if its art fails.
     watch: Option<u32>,
+    /// The launch sweep has been queued.
+    swept: bool,
 }
 
 impl Default for CardsState {
@@ -173,7 +216,6 @@ fn card_sorts() -> Vec<SortOption> {
 impl App {
     pub(crate) fn cards_tab(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        self.pump_art(&ctx);
         let mut collapsed = kit::rail_collapsed(&ctx, "cards");
         if collapsed && self.focus_search.get() {
             collapsed = false;
@@ -625,7 +667,7 @@ impl App {
         let comparing = self.cards.compare.contains(&card.id);
         if ui.is_rect_visible(rect) {
             match self.art_uri("cards", card.id) {
-                Some(uri) => egui::Image::new(uri).corner_radius(CornerRadius::same(8)).paint_at(ui, img),
+                Some(uri) => crate::ui_util::paint_cover(ui, egui::Image::new(uri).corner_radius(CornerRadius::same(8)), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))),
                 None => placeholder(ui.painter(), img, type_color(card.card_type), &card.uma),
             }
             let p = pal(ui);
@@ -1150,7 +1192,7 @@ impl App {
         if ui.is_rect_visible(rect) {
             let alpha = if owned.is_some() { 255 } else { 150 };
             match self.art_uri("cards", c.id) {
-                Some(uri) => egui::Image::new(uri).corner_radius(CornerRadius::same(6)).tint(Color32::from_white_alpha(alpha)).paint_at(ui, img),
+                Some(uri) => crate::ui_util::paint_cover(ui, egui::Image::new(uri).corner_radius(CornerRadius::same(6)).tint(Color32::from_white_alpha(alpha)), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))),
                 None => placeholder(ui.painter(), img, type_color_str(&c.kind), &c.uma),
             }
             let painter = ui.painter();
@@ -1257,18 +1299,51 @@ impl App {
 
     /// Queue card art to download from uma.guide (not in tests or screenshot runs).
     fn queue_art(&mut self, ids: impl IntoIterator<Item = u32>) {
+        self.queue_art_of(Art::Card, ids);
+    }
+
+    /// Queue art of one kind to download, skipping what's already there or queued.
+    pub(crate) fn queue_art_of(&mut self, kind: Art, ids: impl IntoIterator<Item = u32>) {
         if cfg!(test) || std::env::var_os("UMALORD_SCREENSHOT").is_some() || self.root.is_none() {
             return;
         }
         for id in ids {
-            if !self.card_art.contains(&id) && self.cards.art.seen.insert(id) {
-                self.cards.art.pending.push_back(id);
+            let have = match kind {
+                Art::Card => self.card_art.contains(&id),
+                Art::Uma => self.uma_art.contains(&id),
+                Art::Full => self.full_art.contains(&id),
+            };
+            if !have && self.cards.art.seen.insert((kind, id)) {
+                self.cards.art.pending.push_back((kind, id));
             }
         }
     }
 
+    /// Whether a picture is still on its way: queued or downloading, not yet failed.
+    pub(crate) fn art_coming(&self, kind: Art, id: u32) -> bool {
+        self.cards.art.seen.contains(&(kind, id)) && !self.cards.art.failed.contains(&(kind, id))
+    }
+
+    /// Once per launch, when fetching is allowed (Settings → Data and updates): queue the art of
+    /// every released uma and card the knowledge data has and the app doesn't, so nothing shows
+    /// as a placeholder once a release reaches the data.
+    pub(crate) fn sweep_art(&mut self) {
+        if self.cards.art.swept {
+            return;
+        }
+        self.cards.art.swept = true;
+        if !crate::live::enabled() || std::env::var("UMALORD_LIVE").is_ok_and(|v| v != "fetch") {
+            return;
+        }
+        let today = crate::ui_util::today();
+        let umas: Vec<u32> = self.kb.umas.values().filter(|u| u.release.is_empty() || u.release.as_str() <= today.as_str()).map(|u| u.id).collect();
+        let cards: Vec<u32> = self.kb.cards.values().filter(|c| c.released(&today)).map(|c| c.id).collect();
+        self.queue_art_of(Art::Uma, umas);
+        self.queue_art_of(Art::Card, cards);
+    }
+
     /// Start queued downloads, four at a time, and collect finished ones.
-    fn pump_art(&mut self, ctx: &egui::Context) {
+    pub(crate) fn pump_art(&mut self, ctx: &egui::Context) {
         let mut done = Vec::new();
         self.cards.art.running.retain(|rx| match rx.try_recv() {
             Ok(r) => {
@@ -1278,36 +1353,44 @@ impl App {
             Err(mpsc::TryRecvError::Empty) => true,
             Err(mpsc::TryRecvError::Disconnected) => false,
         });
-        for (id, ok) in done {
+        for (kind, id, ok) in done {
             if ok {
-                self.card_art.insert(id);
-            } else if self.cards.art.watch == Some(id) {
+                match kind {
+                    Art::Card => self.card_art.insert(id),
+                    Art::Uma => self.uma_art.insert(id),
+                    Art::Full => self.full_art.insert(id),
+                };
+            } else if {
+                self.cards.art.failed.insert((kind, id));
+                kind == Art::Card && self.cards.art.watch == Some(id)
+            } {
                 self.toast("Saved, but the card art couldn't be downloaded; it shows as a placeholder.", crate::ui_util::ToastKind::Error);
             }
-            if self.cards.art.watch == Some(id) {
+            if kind == Art::Card && self.cards.art.watch == Some(id) {
                 self.cards.art.watch = None;
             }
         }
         let Some(root) = self.root.clone() else { return };
         while self.cards.art.running.len() < 4 {
-            let Some(id) = self.cards.art.pending.pop_front() else { break };
-            let dir = root.join("app").join("assets").join("cards");
+            let Some((kind, id)) = self.cards.art.pending.pop_front() else { break };
+            let dir = root.join("app").join("assets").join(kind.dir());
             let (tx, rx) = mpsc::channel();
             let ctx = ctx.clone();
             std::thread::spawn(move || {
-                let path = dir.join(format!("{id}.webp"));
-                let part = dir.join(format!("{id}.webp.part"));
-                let url = format!("https://uma.guide/img/card/composite/tex_support_card_{id}_thumb.webp");
+                let _ = std::fs::create_dir_all(&dir);
+                let (ext, format) = kind.ext();
+                let path = dir.join(format!("{id}.{ext}"));
+                let part = dir.join(format!("{id}.{ext}.part"));
                 let mut cmd = std::process::Command::new(crate::ask::CURL);
-                cmd.args(["-sSfL", "--max-time", "60", "-o"]).arg(&part).arg(&url);
+                cmd.args(["-sSfL", "--max-time", "60", "-o"]).arg(&part).arg(kind.url(id));
                 crate::ask::hidden(&mut cmd);
                 let ok = cmd.status().is_ok_and(|s| s.success())
-                    && std::fs::read(&part).ok().is_some_and(|b| image::load_from_memory_with_format(&b, image::ImageFormat::WebP).is_ok())
+                    && std::fs::read(&part).ok().is_some_and(|b| image::load_from_memory_with_format(&b, format).is_ok())
                     && std::fs::rename(&part, &path).is_ok();
                 if !ok {
                     let _ = std::fs::remove_file(&part);
                 }
-                let _ = tx.send((id, ok));
+                let _ = tx.send((kind, id, ok));
                 ctx.request_repaint();
             });
             self.cards.art.running.push(rx);
@@ -1377,41 +1460,75 @@ impl App {
         });
         ui.add_space(8.0);
 
-        let Some(info) = self.info(card.id).cloned() else {
+        if self.info(card.id).is_none() {
             ui.label(RichText::new("No knowledge data for this card yet. Rebuild knowledge/data.").color(pal(ui).warn));
             return;
-        };
-        let level = u32::from(card.level);
-        let max_level = u32::from(card.rarity.max_level(4));
+        }
+        self.card_sections(ui, card.id, Some(u32::from(card.level)));
 
-        card_explained(ui, "Support effects", "What the card adds to training. Green numbers in the last column are what you'd gain by maxing it.", |ui| {
-            egui::Grid::new("card_effects").num_columns(3).striped(true).spacing([18.0, 5.0]).show(ui, |ui| {
-                ui.label(RichText::new("Effect").color(p.weak));
-                ui.label(RichText::new(format!("Yours · Lv {level}")).color(p.weak));
-                ui.label(RichText::new(format!("MLB · Lv {max_level}")).color(p.weak));
-                ui.end_row();
-                for e in &info.effects {
-                    let now = effect_at(&e.points, level);
-                    let max = effect_at(&e.points, max_level);
-                    if now.unwrap_or(0) == 0 && max.unwrap_or(0) == 0 {
-                        continue;
+        let others: Vec<&SupportCard> = self.roster.cards.iter().filter(|c| c.uma == card.uma && c.id != card.id).collect();
+        if !others.is_empty() {
+            card_titled(ui, &format!("Other {} cards", card.uma), |ui| {
+                for c in others {
+                    if ui.link(format!("🃏 {} {} [{}] LB{}", c.rarity.label(), c.card_type.label(), c.title, c.lb)).clicked() {
+                        self.jump.set(Some(Jump::Card(c.id)));
                     }
-                    ui.label(&e.name);
-                    ui.label(semibold(now.map_or("—".to_string(), |v| v.to_string()), 14.0));
-                    let max_text = max.map_or("—".to_string(), |v| v.to_string());
-                    ui.label(if max != now { semibold(max_text, 14.0).color(pal(ui).good) } else { RichText::new(max_text).color(p.weak) });
-                    ui.end_row();
                 }
             });
+        }
+        ui.add_space(10.0);
+    }
+
+    /// Everything known about a card, below its header: its effects at `level` (owned) beside
+    /// their MLB values, its unique effect, the skills it teaches and its events. Collection's
+    /// detail panel and the detail pop-up both draw it.
+    pub(crate) fn card_sections(&mut self, ui: &mut egui::Ui, id: u32, level: Option<u32>) {
+        let p = pal(ui);
+        let Some(info) = self.info(id).cloned() else { return };
+        let max_level = u32::from(crate::data::Rarity::from_id(id).unwrap_or(crate::data::Rarity::SSR).max_level(4));
+
+        let explain = if level.is_some() { "What the card adds to training. Green numbers in the last column are what you'd gain by maxing it." } else { "What the card adds to training, fully limit broken (MLB)." };
+        // Rows with something at either level: (name, yours, MLB).
+        let rows: Vec<(String, Option<i32>, Option<i32>)> = info
+            .effects
+            .iter()
+            .map(|e| (e.name.clone(), level.and_then(|l| effect_at(&e.points, l)), effect_at(&e.points, max_level)))
+            .filter(|(_, now, max)| now.unwrap_or(0) != 0 || max.unwrap_or(0) != 0)
+            .collect();
+        card_explained(ui, "Support effects", explain, |ui| {
+            // The table fills the card: two halves side by side when there's room, else one.
+            let w = ui.available_width();
+            let gap = 48.0;
+            // Halves only when each half still fits the longest names (about 165 px, "Initial Friendship Gauge") whole.
+            let need = EFFECT_NAME_W + effect_values_w(level);
+            let halves = w >= 2.0 * need + gap && rows.len() > 4;
+            if halves {
+                let mid = rows.len().div_ceil(2);
+                let col = (w - gap) / 2.0;
+                let r = ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for (k, part) in [&rows[..mid], &rows[mid..]].into_iter().enumerate() {
+                        ui.allocate_ui_with_layout(vec2(col, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                            ui.set_width(col);
+                            effects_grid(ui, (id, k), part, level, max_level, col);
+                        });
+                    }
+                });
+                // A faint rule between the halves, so a row doesn't read across both.
+                let x = r.response.rect.left() + col + gap / 2.0;
+                ui.painter().vline(x, r.response.rect.y_range(), egui::Stroke::new(1.0, p.border));
+            } else {
+                effects_grid(ui, (id, 0), &rows, level, max_level, w);
+            }
         });
 
         if let Some(u) = &info.unique {
             card_explained(ui, "Unique effect", "An extra effect only this card has, once it reaches the level shown.", |ui| {
-                if level >= u.level {
-                    badge(ui, format!("Active · from Lv {}", u.level), p.accent);
-                } else {
-                    badge(ui, format!("Locked until Lv {}", u.level), pal(ui).warn);
-                }
+                match level {
+                    Some(l) if l >= u.level => badge(ui, format!("Active · from Lv {}", u.level), p.accent),
+                    Some(_) => badge(ui, format!("Locked until Lv {}", u.level), pal(ui).warn),
+                    None => badge(ui, format!("From Lv {}", u.level), p.weak),
+                };
                 ui.add_space(4.0);
                 if !u.condition.is_empty() {
                     ui.label(RichText::new(format!("{}:", u.condition)).color(p.weak));
@@ -1448,7 +1565,7 @@ impl App {
         if !info.events.is_empty() {
             card_explained(ui, &format!("Events ({})", info.events.len()), "The card's story events and what each choice gives. Click one to open it.", |ui| {
                 for (i, e) in info.events.iter().enumerate() {
-                    egui::CollapsingHeader::new(&e.title).id_salt(("card_ev", card.id, i)).show(ui, |ui| {
+                    egui::CollapsingHeader::new(&e.title).id_salt(("card_ev", id, i)).show(ui, |ui| {
                         ui.label(RichText::new(&e.kind).size(11.5).color(p.weak));
                         if e.options.is_empty() {
                             ui.label(RichText::new("No outcome data.").color(p.weak));
@@ -1468,19 +1585,60 @@ impl App {
                 }
             });
         }
-
-        let others: Vec<&SupportCard> = self.roster.cards.iter().filter(|c| c.uma == card.uma && c.id != card.id).collect();
-        if !others.is_empty() {
-            card_titled(ui, &format!("Other {} cards", card.uma), |ui| {
-                for c in others {
-                    if ui.link(format!("🃏 {} {} [{}] LB{}", c.rarity.label(), c.card_type.label(), c.title, c.lb)).clicked() {
-                        self.jump.set(Some(Jump::Card(c.id)));
-                    }
-                }
-            });
-        }
-        ui.add_space(10.0);
     }
+}
+
+
+const EFFECT_NAME_W: f32 = 175.0;
+const EFFECT_VAL_W: f32 = 92.0;
+
+/// The width a support-effects table's value columns take (with their spacing).
+fn effect_values_w(level: Option<u32>) -> f32 {
+    (if level.is_some() { 2.0 } else { 1.0 }) * (EFFECT_VAL_W + 12.0) + 8.0
+}
+
+/// One support-effects table `width` wide: the effect's name takes what the value columns leave.
+fn effects_grid(ui: &mut egui::Ui, salt: (u32, usize), rows: &[(String, Option<i32>, Option<i32>)], level: Option<u32>, max_level: u32, width: f32) {
+    let p = pal(ui);
+    let (val_w, spacing) = (EFFECT_VAL_W, 12.0);
+    let cols = if level.is_some() { 2.0 } else { 1.0 };
+    let name_w = (width - effect_values_w(level)).max(120.0);
+    let left = |ui: &mut egui::Ui, h: f32, text: RichText, hover: Option<&str>| {
+        ui.allocate_ui_with_layout(vec2(name_w, h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.set_width(name_w);
+            let r = ui.add(egui::Label::new(text).truncate());
+            if let Some(h) = hover {
+                r.on_hover_text(h);
+            }
+        });
+    };
+    let dash = |v: Option<i32>| v.map_or("—".to_string(), |v| v.to_string());
+    // Numbers line up on their last digit.
+    let right = |ui: &mut egui::Ui, h: f32, text: RichText| {
+        ui.allocate_ui_with_layout(vec2(val_w, h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.set_width(val_w);
+            ui.label(text);
+        });
+    };
+    egui::Grid::new(("card_effects", salt)).num_columns(1 + cols as usize).striped(true).spacing([spacing, 5.0]).show(ui, |ui| {
+        left(ui, 18.0, RichText::new("Effect").color(p.weak), None);
+        if let Some(level) = level {
+            right(ui, 18.0, RichText::new(format!("Yours · Lv {level}")).color(p.weak));
+        }
+        right(ui, 18.0, RichText::new(format!("MLB · Lv {max_level}")).color(p.weak));
+        ui.end_row();
+        for (name, now, max) in rows {
+            left(ui, 20.0, RichText::new(name.as_str()), Some(name.as_str()));
+            if level.is_some() {
+                right(ui, 20.0, semibold(dash(*now), 14.0));
+                let max_text = if max != now { semibold(dash(*max), 14.0).color(pal(ui).good) } else { RichText::new(dash(*max)).color(p.weak) };
+                right(ui, 20.0, max_text);
+            } else {
+                right(ui, 20.0, semibold(dash(*max), 14.0));
+            }
+            ui.end_row();
+        }
+    });
 }
 
 /// A quick action on a card tile.
@@ -1509,6 +1667,33 @@ fn short_effect(name: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every uma and card in the knowledge data ships with its art, so nothing shows as a
+    /// placeholder. `tools/update_knowledge.py` downloads the art of new ones; run it again if
+    /// this fails.
+    #[test]
+    fn every_uma_and_card_has_art() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let kb = crate::knowledge::Knowledge::load(Some(&root));
+        let missing: Vec<String> = kb
+            .umas
+            .keys()
+            .map(|id| ("umas", *id))
+            .chain(kb.cards.keys().map(|id| ("cards", *id)))
+            .filter(|(dir, id)| !root.join("app/assets").join(dir).join(format!("{id}.webp")).is_file())
+            .map(|(dir, id)| format!("{dir}/{id}"))
+            .collect();
+        assert!(missing.is_empty(), "no art for {} (run tools/update_knowledge.py): {:?}", missing.len(), &missing[..missing.len().min(10)]);
+    }
+
+    #[test]
+    fn art_urls_follow_uma_guide() {
+        // Checked against uma.guide on 2026-10-28: Special Week's icon is byte for byte the bundled one.
+        assert_eq!(Art::Uma.url(100101), "https://uma.guide/icon/uma/chr_icon_1001_100101_01.webp");
+        assert_eq!(Art::Card.url(10001), "https://uma.guide/img/card/composite/tex_support_card_10001_thumb.webp");
+        assert_eq!((Art::Uma.dir(), Art::Card.dir()), ("umas", "cards"));
+    }
+
     use super::*;
 
     /// The Cards table sorts by an effect at the owned level and by type; the LB chips, effect

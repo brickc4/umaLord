@@ -631,6 +631,19 @@ impl App {
                 ui.label(RichText::new(format!("⚠ {e}")).color(p.warn));
             }
         });
+        setting_row(ui, "Weekly pack", "New umas, cards and their art, refreshed from uma.guide and tested each week, then downloaded here (only what changed).", |ui| {
+            ui.horizontal(|ui| {
+                if self.pack.is_some() {
+                    ui.spinner();
+                    ui.label(RichText::new("Checking…").color(p.weak));
+                } else if ui.button("Check now").clicked() {
+                    let ctx = ui.ctx().clone();
+                    self.pack_check(&ctx, true);
+                }
+                let checked = crate::settings::get("data_pack_checked").and_then(|v| v.as_str().map(String::from));
+                ui.label(RichText::new(self.pack_status.clone().unwrap_or_else(|| checked.map_or("Not checked yet.".into(), |d| format!("Last checked {d}.")))).size(size::SM).color(p.weak));
+            });
+        });
         setting_row(ui, "Umalator", "The race simulator's skills and courses, and its Champions Meeting presets (Moomoolator, umalator.app).", |ui| {
             ui.label(format!("Built {} · {} courses · {} event presets", day(&self.kb.umalator_built), self.kb.umalator_courses.len(), self.kb.umalator_presets.len()));
         });
